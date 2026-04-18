@@ -77,22 +77,38 @@ postgresql://gitdoc_<slug>:<password>@<homelab-postgres-host>:5432/gitdoc_<slug>
 - `sslmode=require` assumes the homelab Postgres presents TLS.
   Downgrade to `sslmode=prefer` only if you have verified it does not.
 
-## 4. Wire it into the Helm values
+## 4. Wire it into a sealed Secret
 
-For MVP, drop the DSN straight into the per-instance values file:
+The DSN becomes the `POSTGRES_DSN` key in the instance's Kubernetes
+Secret, which the `db-migrate` Job, the RAG orchestrator, and the
+ingestion CronJob all read via `envFrom`.
+
+**Default path: sealed-secrets.** Put the DSN into the draft plaintext
+Secret alongside the other three credentials (`DISCORD_BOT_TOKEN`,
+`LITELLM_API_KEY`, `GIT_TOKEN`), seal it with `kubeseal`, commit the
+sealed manifest to `deploy/sealed-secrets/<slug>.yaml`, apply it, and
+point the Helm values at the materialised Secret:
 
 ```yaml
 # deploy/helm/gitdoc/values-<slug>.yaml
 secrets:
+  existingSecret: "gitdoc-<slug>"
+```
+
+See `deploy/SECRETS.md` for the full procedure — it's the same four
+keys whichever path you take.
+
+**Bootstrap path (first deploy only).** If sealed-secrets isn't
+installed yet, drop the DSN straight into the per-instance values file
+as a stopgap:
+
+```yaml
+# deploy/helm/gitdoc/values-<slug>.yaml   (gitignored; do not commit)
+secrets:
   postgresDsn: "postgresql://gitdoc_<slug>:<password>@<host>:5432/gitdoc_<slug>?sslmode=require"
 ```
 
-This becomes the `POSTGRES_DSN` Secret key the `db-migrate` Job, the
-RAG orchestrator, and the ingestion CronJob all read.
-
-**Future home:** once task 10 (secrets hardening) lands, this DSN
-should move to sealed-secrets / external-secrets instead of living in
-a plaintext values file. Update this README when that flow exists.
+Migrate to the sealed path as soon as the controller is installed.
 
 ## 5. Verify
 

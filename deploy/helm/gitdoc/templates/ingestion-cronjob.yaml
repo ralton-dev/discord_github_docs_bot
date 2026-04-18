@@ -35,7 +35,7 @@ spec:
                 - configMapRef:
                     name: {{ include "gitdoc.fullname" . }}-config
                 - secretRef:
-                    name: {{ include "gitdoc.fullname" . }}-secrets
+                    name: {{ include "gitdoc.secretName" . }}
               # HOME under the read-only rootfs would block `git clone` from
               # writing transient state (~/.gitconfig, ~/.cache/git). Point it
               # at a writable emptyDir.

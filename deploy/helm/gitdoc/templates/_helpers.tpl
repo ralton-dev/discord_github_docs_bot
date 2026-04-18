@@ -26,3 +26,17 @@ app.kubernetes.io/name: gitdoc
 app.kubernetes.io/component: rag
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
+
+{{/*
+Name of the Secret workloads envFrom. Resolves to `secrets.existingSecret`
+when the operator has provided an out-of-band Secret (sealed-secrets /
+external-secrets), otherwise falls back to the chart-managed Secret name.
+Single source of truth — every envFrom / secretKeyRef references this.
+*/}}
+{{- define "gitdoc.secretName" -}}
+{{- if .Values.secrets.existingSecret -}}
+{{- .Values.secrets.existingSecret -}}
+{{- else -}}
+{{- printf "%s-secrets" (include "gitdoc.fullname" .) -}}
+{{- end -}}
+{{- end -}}

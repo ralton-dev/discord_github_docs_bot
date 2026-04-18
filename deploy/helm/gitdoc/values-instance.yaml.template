@@ -6,11 +6,23 @@
 # 3. Run from the repo root:
 #       make helm-install REPO=<slug>
 #
-# WARNING: this file ends up containing PLAINTEXT SECRETS in git if you
-# commit it. For MVP this is accepted — see implementation_plans/10-secrets-
-# hardening.md, which moves these fields onto sealed-secrets / external-
-# secrets. Until that lands, KEEP values-<slug>.yaml OUT OF git (it is
-# already covered by the project gitignore).
+# Secrets — pick ONE path (see deploy/SECRETS.md for the full procedure):
+#
+#   A. SEALED (default, recommended).
+#      - Produce a SealedSecret via `kubeseal` and commit it to
+#        `deploy/sealed-secrets/<slug>.yaml`.
+#      - Set `secrets.existingSecret: gitdoc-<slug>` below (the name must
+#        match the Secret's `metadata.name` in your sealed manifest).
+#      - Leave the inline `secrets.*` fields commented out — they are
+#        ignored when `existingSecret` is set.
+#
+#   B. BOOTSTRAP (first deploy, before sealed-secrets is installed).
+#      - Leave `secrets.existingSecret` empty.
+#      - Uncomment the plaintext fields and fill them in.
+#      - WARNING: this file then contains plaintext credentials; the repo's
+#        .gitignore already excludes `values-*.yaml` (except the example).
+#        Do not `git add -f` it. Migrate to path A as soon as sealed-
+#        secrets is installed on the cluster.
 #
 # Naming rules
 # ------------
@@ -44,22 +56,45 @@ images:
   ingestion:  { tag: "CHANGE_ME_release_tag" }
 
 # ---------------------------------------------------------------------------
-# Secrets — plain text for MVP. See WARNING above.
+# Secrets — default path is sealed-secrets. See deploy/SECRETS.md.
 # ---------------------------------------------------------------------------
 secrets:
+  # PATH A — SEALED (default). Set this to the name of the Secret that the
+  # sealed-secrets controller materialises in the release namespace. The
+  # committed manifest lives at deploy/sealed-secrets/<slug>.yaml.
+  existingSecret: "gitdoc-CHANGE_ME_slug"
+
+  # PATH B — BOOTSTRAP (plaintext). Uncomment and fill in for the very
+  # first deploy BEFORE sealed-secrets is installed. If you use this path,
+  # leave `existingSecret` empty above. These fields are ignored when
+  # `existingSecret` is set. Migrate to Path A as soon as possible.
+  #
   # Discord bot token from https://discord.com/developers/applications/<id>/bot
-  discordBotToken: "CHANGE_ME_discord_bot_token"
-
+  # discordBotToken: "CHANGE_ME_discord_bot_token"
+  #
   # LiteLLM API key (the `master_key` or a virtual key on the LiteLLM proxy).
-  litellmApiKey: "CHANGE_ME_litellm_key"
-
+  # litellmApiKey: "CHANGE_ME_litellm_key"
+  #
   # Postgres DSN built from db/provision/README.md step 3:
   #   postgresql://gitdoc_<slug>:<password>@<host>:5432/gitdoc_<slug>?sslmode=require
-  postgresDsn: "postgresql://gitdoc_CHANGE_ME_slug:CHANGE_ME_password@CHANGE_ME_pg_host:5432/gitdoc_CHANGE_ME_slug?sslmode=require"
-
+  # postgresDsn: "postgresql://gitdoc_CHANGE_ME_slug:CHANGE_ME_password@CHANGE_ME_pg_host:5432/gitdoc_CHANGE_ME_slug?sslmode=require"
+  #
   # Personal access token for private repo clones. Leave "" for public repos.
   # GitHub: a fine-grained PAT scoped to read-only on the single repo is enough.
-  gitToken: ""
+  # gitToken: ""
+  #
+  # Shared secret for /webhook signature verification. Only required when
+  # `webhook.enabled` is true (see docs/webhooks.md for the GitHub/GitLab setup).
+  # webhookSecret: "CHANGE_ME_webhook_secret"
+
+# ---------------------------------------------------------------------------
+# Webhook-driven ingestion (optional, see docs/webhooks.md). When enabled,
+# the rag pod exposes POST /webhook and spawns an ingestion Job on every
+# verified push. The CronJob remains as a safety net.
+# ---------------------------------------------------------------------------
+# webhook:
+#   enabled: true
+#   stalenessThresholdSecs: 7200
 
 # ---------------------------------------------------------------------------
 # Discord — guildAllowlist gates the /ask command. Empty = allow every guild

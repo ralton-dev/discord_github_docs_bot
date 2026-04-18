@@ -32,7 +32,7 @@ spec:
             - configMapRef:
                 name: {{ include "gitdoc.fullname" . }}-config
             - secretRef:
-                name: {{ include "gitdoc.fullname" . }}-secrets
+                name: {{ include "gitdoc.secretName" . }}
           # discord.py / httpx / SSL libs write to /tmp; root FS is read-only.
           volumeMounts:
             - name: tmp

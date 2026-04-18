@@ -33,13 +33,41 @@ models:
   # once task 17 lands (per-instance setting persisted in the DB).
   chat: "ollama_chat/llama3.2:3b"
 
-# NOTE: for real deployments prefer sealed-secrets / external-secrets
-# over plain-text values here. Fields left empty will be rendered as "".
+# Secrets are materialised into a Kubernetes Secret the workloads envFrom.
+#
+# Two modes, mutually exclusive:
+#
+#   1. BOOTSTRAP (plaintext, first deploy only)
+#      Leave `existingSecret` empty and fill the `discordBotToken` /
+#      `litellmApiKey` / `postgresDsn` / `gitToken` fields below. Values
+#      render into a chart-managed Secret. DO NOT commit values files
+#      that use this path — the repo's .gitignore covers `values-*.yaml`
+#      (except `values-example.yaml`). Intended only to get the very
+#      first deploy off the ground before sealed-secrets is installed.
+#
+#   2. SEALED (steady-state, recommended)
+#      Set `existingSecret` to the name of a Secret the operator has
+#      materialised out-of-band — typically via a SealedSecret manifest
+#      applied to the namespace. When this is set, the chart does NOT
+#      render its own Secret, and every workload envFrom's the name
+#      you provide. See deploy/SECRETS.md for the kubeseal procedure.
+#
+# In either mode the Secret MUST expose the same four keys — the
+# workloads read them by name, not by source:
+#   DISCORD_BOT_TOKEN, LITELLM_API_KEY, POSTGRES_DSN, GIT_TOKEN
 secrets:
+  # Name of a pre-existing Secret in the release namespace. When set,
+  # the chart's own Secret is not rendered and workloads envFrom this.
+  existingSecret: ""
+
+  # Plaintext bootstrap fields. Ignored when `existingSecret` is set.
   discordBotToken: ""
   litellmApiKey: ""
   postgresDsn: ""
   gitToken: ""
+  # Only required when `webhook.enabled` is true; shared secret used to
+  # verify GitHub/GitLab push webhooks. See deploy/SECRETS.md + docs/webhooks.md.
+  webhookSecret: ""
 
 # Discord allows one gateway websocket per bot token. Keep replicas=1.
 # To scale, use Discord sharding, not extra pods.
@@ -80,3 +108,12 @@ ingestion:
 dbMigrate:
   enabled: true
   image: "postgres:16-alpine"
+
+# Webhook-driven ingestion (plan 15). When enabled, the rag Deployment
+# exposes POST /webhook and spawns a Job from the ingestion CronJob on
+# every verified push. The CronJob stays as a safety net.
+webhook:
+  enabled: false
+  # "ok" means last successful ingestion within this many seconds.
+  # GET /status/ingestion?repo=<slug> reports this as "ok" or "stale".
+  stalenessThresholdSecs: 7200

@@ -1,0 +1,37 @@
+gitdoc release "{{ .Release.Name }}" installed in namespace "{{ .Release.Namespace }}".
+
+Repo    : {{ .Values.repo.name }} ({{ .Values.repo.url }}@{{ .Values.repo.branch }})
+Images  : {{ .Values.images.bot.tag }} (bot) / {{ .Values.images.rag.tag }} (rag) / {{ .Values.images.ingestion.tag }} (ingestion)
+
+Secret source
+-------------
+{{- if .Values.secrets.existingSecret }}
+Using operator-managed Secret: {{ .Values.secrets.existingSecret }}
+  (chart-rendered Secret SKIPPED; workloads envFrom the name above.)
+{{- else }}
+Using chart-managed Secret: {{ include "gitdoc.fullname" . }}-secrets
+  (rendered from values.yaml `secrets.*` plaintext fields — bootstrap path.)
+{{- end }}
+
+Secret contract — whichever Secret provides credentials MUST contain:
+  DISCORD_BOT_TOKEN  — Discord bot gateway token
+  LITELLM_API_KEY    — LiteLLM proxy API key
+  POSTGRES_DSN       — postgresql://gitdoc_<slug>:<pw>@<host>:5432/gitdoc_<slug>?sslmode=require
+  GIT_TOKEN          — personal access token for private clones (may be empty)
+
+For the sealed-secrets steady-state flow (recommended), see:
+  deploy/SECRETS.md
+
+Next steps
+----------
+1. Wait for pods to reach Running:
+   kubectl -n {{ .Release.Namespace }} get pods -w
+
+2. Confirm the db-migrate pre-install Job succeeded:
+   kubectl -n {{ .Release.Namespace }} get jobs
+
+3. Smoke-test the whole stack:
+   NAMESPACE={{ .Release.Namespace }} RELEASE={{ .Release.Name }} ./scripts/smoke-test.sh
+
+4. Ask a question from the Discord guild listed in `discordBot.guildAllowlist`:
+   /ask  query: what does this project do?

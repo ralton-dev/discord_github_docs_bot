@@ -33,12 +33,16 @@ spec:
             - |
               set -eu
               psql "$POSTGRES_DSN" -v ON_ERROR_STOP=1 -f /migrations/init.sql
+          # Normalised to envFrom (plan 10) so every workload resolves the
+          # Secret through the single `gitdoc.secretName` helper. This
+          # container only needs POSTGRES_DSN but exposing the other keys
+          # as env vars in a pre-install hook pod is acceptable — the pod
+          # is short-lived and the Secret's namespace is already the
+          # trust boundary.
+          envFrom:
+            - secretRef:
+                name: {{ include "gitdoc.secretName" . }}
           env:
-            - name: POSTGRES_DSN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "gitdoc.fullname" . }}-secrets
-                  key: POSTGRES_DSN
             - name: HOME
               value: /tmp
           volumeMounts:
