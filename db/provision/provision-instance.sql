@@ -76,6 +76,21 @@ SELECT 'gitdoc_' || :'slug' AS dbname \gset
 
 CREATE EXTENSION IF NOT EXISTS vector;
 
+-- 5. Hand the `public` schema to the instance role.
+--    Postgres 15+ locked down the default public-schema ACLs: the DB
+--    owner role no longer implicitly has CREATE on `public`, so tables
+--    created by the db-migrate Job end up under the connecting role only
+--    if CREATE is explicit. Transferring ownership of the schema to the
+--    instance role is the cleanest fix — this is a dedicated per-instance
+--    database, so the role effectively owns everything in it. All
+--    subsequent CREATE TABLE / CREATE INDEX statements end up owned by
+--    the instance role, which is what every other query path (including
+--    ingestion upserts and DROP-on-decommission) assumes.
+SELECT format('ALTER SCHEMA public OWNER TO %I', 'gitdoc_' || :'slug')
+\gexec
+SELECT format('GRANT ALL ON SCHEMA public TO %I', 'gitdoc_' || :'slug')
+\gexec
+
 -- 5. Summary for the operator.
 \echo
 \echo 'Provisioned:'
