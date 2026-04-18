@@ -1,0 +1,7 @@
+# Test-only dependencies. Install alongside each service's runtime deps:
+#   pip install -r requirements-dev.txt \
+#               -r services/ingestion/requirements.txt \
+#               -r services/discord-bot/requirements.txt \
+#               -r services/rag-orchestrator/requirements.txt
+pytest>=8,<10
+pytest-cov>=5,<8

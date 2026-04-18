@@ -25,7 +25,7 @@ else
 TAG ?= $(VERSION)-$(GIT_SHA)
 endif
 
-.PHONY: build buildx-push push print-tag lint helm-lint helm-template helm-install
+.PHONY: build buildx-push push print-tag lint helm-lint helm-template helm-install test
 
 ## print-tag: echo the resolved image tag (useful for CI)
 print-tag:
@@ -58,6 +58,15 @@ buildx-push:
 			--push \
 			services/$$svc || exit 1; \
 	done
+
+## test: run the pytest unit-test suite from the repo root.
+## Install test deps first:
+##   pip install -r requirements-dev.txt \
+##               -r services/ingestion/requirements.txt \
+##               -r services/discord-bot/requirements.txt \
+##               -r services/rag-orchestrator/requirements.txt
+test:
+	pytest
 
 helm-lint:
 	helm lint deploy/helm/gitdoc
