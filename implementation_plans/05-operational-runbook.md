@@ -130,3 +130,89 @@ Release workflow notes:
   acceptance criterion `Each procedure validated by walking through it
   once on task 04's instance` is the gate — do not ship the runbook
   prose without the walk-through.
+
+---
+
+## Appendix: Drafted from task 16
+
+> Captured while wiring up thread-aware conversations in
+> `services/discord-bot/bot.py`. When task 05 writes the full runbook,
+> fold this into the "Daily ops / Discord" section.
+
+- **Discord developer-portal step (mandatory before deploy).** The bot
+  now reads message bodies in threads it started, which is a
+  **privileged** intent. In `bot.py` we set
+  `intents.message_content = True`, but Discord *also* requires the
+  operator to enable it in the dev portal:
+
+  > Discord Developer Portal -> Applications -> *<app>* -> Bot ->
+  > "Privileged Gateway Intents" section -> toggle
+  > **MESSAGE CONTENT INTENT** on -> Save Changes.
+
+  If this is left off, the bot logs in fine and `/ask` works, but
+  follow-ups in threads silently see empty `message.content` and
+  appear to be ignored. Make this the first item in any "bot replies
+  to /ask but ignores follow-ups" troubleshooting tree.
+
+- **Killing a runaway thread.** If a thread starts looping or accrues
+  unwanted noise, delete it from Discord directly (right-click thread
+  -> *Delete Thread*, or via REST: `DELETE /channels/{thread_id}`).
+  Thread deletion is final — the bot does not need to be involved and
+  has no in-bot kill switch. To temporarily mute the bot in one
+  thread, archive it (right-click -> *Archive Thread*); the bot will
+  not send into archived threads and the next `/ask` opens a fresh
+  one. Auto-archive is set to 60 minutes of inactivity, so most stale
+  threads clean themselves up.
+
+- **`/ask single:true` overrides everything.** If a user (or operator
+  testing) wants the original single-turn behaviour without any thread
+  creation or follow-up handling, they pass `single:true` to the slash
+  command. Use this:
+    1. As the workaround when the orchestrator is misbehaving on
+       multi-turn (until plan 11+ stabilises).
+    2. To probe whether a bug is in single-turn `/ask` or in the
+       follow-up path — if `single:true` works and the default doesn't,
+       the bug is in `on_message` / `_collect_thread_history` /
+       `_ask_orchestrator` history forwarding.
+
+- **Auto-archive duration.** Set via `auto_archive_duration=60` (60
+  minutes) in `Message.create_thread`. Discord only accepts
+  `60 / 1440 / 4320 / 10080` (1h / 1d / 3d / 7d). To change globally,
+  edit `THREAD_AUTO_ARCHIVE_MINUTES` in `bot.py` (no chart change
+  needed) and roll the bot deployment.
+
+- **How the bot identifies "its own" threads.** `on_message` checks
+  three things in order:
+    1. `isinstance(message.channel, discord.Thread)` — message is in a
+       thread (not a regular channel or DM).
+    2. `_is_bot_thread(thread)` — the thread's starter message author
+       equals `client.user`. We try the cached `thread.starter_message`
+       first; if the cache is cold we fetch the message from the parent
+       channel (a thread's ID equals its starter message's ID, which
+       makes the lookup free of any bookkeeping).
+    3. `message.author.bot` is False — never react to other bots, our
+       own retries, or webhook chatter.
+
+  If you see the bot replying in threads it didn't open, suspect (2):
+  someone reused a thread name in a channel where the bot once
+  answered. The starter-message check should still keep us out, but
+  log inspection (`grep "rag call failed for thread follow-up"`) is
+  the fastest confirmation.
+
+- **History token-budget tuning.** Currently `HISTORY_TURN_LIMIT = 10`
+  and `HISTORY_CHAR_BUDGET = 3000` (chars, not tokens — a deliberate
+  conservative proxy at roughly 1 char ≈ 0.25 tokens). Bump in
+  `bot.py` if a particular instance needs longer multi-turn memory
+  and the chosen chat model has the context window. **Citations from
+  prior bot answers are compacted** to `[src: a.py, b.md, ...]` before
+  forwarding — only the file paths survive into history, never the
+  full Markdown bullet list with short SHAs.
+
+- **Graceful-degrade on orchestrator 422.** `_ask_orchestrator` retries
+  without `history` when the orchestrator rejects the payload (422),
+  and logs `"falling back to single-turn"` exactly **once per process**
+  (controlled by `_history_unsupported_logged`). The bot never errors
+  out on the user when the RAG side hasn't yet shipped multi-turn
+  support. Operator action: when the orchestrator is upgraded to
+  accept `history`, restart the bot deployment so the latch resets and
+  any future genuine 422s log again.
