@@ -106,10 +106,14 @@ End-to-end walk-through lives in [`deploy/DEPLOY.md`](deploy/DEPLOY.md):
 
 ## Documentation
 
+- [`docs/architecture.md`](docs/architecture.md) — how the pieces fit
+  together, how the Discord app links to the pod, request flows
+- [`docs/discord-setup.md`](docs/discord-setup.md) — Discord dev-portal
+  walkthrough (one-time per instance: app, bot token, intents, invite URL)
 - [`deploy/DEPLOY.md`](deploy/DEPLOY.md) — full deploy procedure
 - [`deploy/SECRETS.md`](deploy/SECRETS.md) — sealed-secrets workflow
 - [`deploy/REGISTRY.md`](deploy/REGISTRY.md) — image registry setup
-- [`docs/retrieval.md`](docs/retrieval.md) — hybrid search, reranker, cache
+- [`docs/retrieval.md`](docs/retrieval.md) — hybrid search, reranker, cache, rate limits
 - [`docs/webhooks.md`](docs/webhooks.md) — GitHub/GitLab push webhooks
 - [`docs/observability.md`](docs/observability.md) — metrics + logs
 - [`docs/models.md`](docs/models.md) — runtime model selection
