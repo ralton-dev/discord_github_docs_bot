@@ -1,0 +1,78 @@
+# Dependabot config — weekly cadence across every requirements file and
+# the GitHub Actions workflows. One PR per ecosystem + directory pair.
+#
+# PRs land on `main` and go through the same CI gate as human PRs, so
+# nothing merges unless `Lint + unit tests` and `Build images (verification)`
+# are green. Grouped updates to minimise noise.
+
+version: 2
+updates:
+  # --- GitHub Actions (ci.yml + release.yml) -------------------------------
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # --- Python services ----------------------------------------------------
+  - package-ecosystem: pip
+    directory: /services/rag
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      rag-runtime:
+        patterns: ["*"]
+
+  - package-ecosystem: pip
+    directory: /services/ingestion
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      ingestion-runtime:
+        patterns: ["*"]
+
+  - package-ecosystem: pip
+    directory: /services/discord-bot
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      bot-runtime:
+        patterns: ["*"]
+
+  # --- Dev deps (pytest, testcontainers, etc.) ----------------------------
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      dev-deps:
+        patterns: ["*"]
+
+  # --- Docker base images (python:3.12-slim + postgres:16-alpine) ---------
+  - package-ecosystem: docker
+    directory: /services/rag
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+  - package-ecosystem: docker
+    directory: /services/ingestion
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+  - package-ecosystem: docker
+    directory: /services/discord-bot
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
