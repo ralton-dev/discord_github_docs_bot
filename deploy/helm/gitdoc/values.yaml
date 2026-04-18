@@ -1,14 +1,23 @@
 nameOverride: ""
 
+# NOTE: images.*.repository below is a PLACEHOLDER. The registry has not
+# been chosen yet — see implementation_plans/working-memory.md (the
+# "Registry" open question) and deploy/REGISTRY.md for the three options
+# under consideration (GHCR / Harbor / local registry:2) and the
+# `regcred` Secret pattern for private registries.
+# The image tag should match `make print-tag` output at deploy time.
 images:
+  # registry decision pending — see deploy/REGISTRY.md
   bot:
     repository: ghcr.io/you/gitdoc-discord-bot
     tag: "0.1.0"
     pullPolicy: IfNotPresent
+  # registry decision pending — see deploy/REGISTRY.md
   rag:
     repository: ghcr.io/you/gitdoc-rag
     tag: "0.1.0"
     pullPolicy: IfNotPresent
+  # registry decision pending — see deploy/REGISTRY.md
   ingestion:
     repository: ghcr.io/you/gitdoc-ingestion
     tag: "0.1.0"
