@@ -216,3 +216,95 @@ Release workflow notes:
   support. Operator action: when the orchestrator is upgraded to
   accept `history`, restart the bot deployment so the latch resets and
   any future genuine 422s log again.
+
+---
+
+## Appendix: Drafted from task 09
+
+> Captured while wiring up metrics + structured logs in `services/rag/`,
+> `services/ingestion/`, and `services/discord-bot/`, plus the chart's
+> gated `ServiceMonitor`. When task 05 writes the full runbook, fold this
+> into the "Day-2 ops / monitoring" section. Full metric/log reference
+> lives in `docs/observability.md`; the runbook only needs the
+> cluster-operator one-liners below.
+
+- **Reading metrics without Prometheus.** The rag pod exposes `/metrics`
+  unconditionally. Fastest sanity check from the cluster:
+  ```sh
+  kubectl -n gitdoc-<slug> port-forward svc/gitdoc-<slug>-rag 8000:8000
+  curl -s http://localhost:8000/metrics | grep -E '^gitdoc_' | head
+  ```
+  Use this when "is the service actually recording metrics?" needs an
+  answer before deciding to blame the scraper.
+
+- **ServiceMonitor troubleshooting.** When `observability.serviceMonitor.enabled=true`
+  renders the object but Prometheus is not scraping, the default cause is
+  `serviceMonitorSelector` on the Prometheus CR. Check:
+  ```sh
+  kubectl -n <prom-ns> get prometheus -o jsonpath='{.items[*].spec.serviceMonitorSelector}'
+  ```
+  then add matching labels via `observability.serviceMonitor.labels` in
+  the values file and `helm upgrade`.
+
+- **Log querying cheat-sheet.** JSON-shaped stdout makes `jq` the right
+  tool. Canonical queries every operator will run:
+  ```sh
+  # "Why did /ask return an error?" — pull the last few ERROR lines.
+  kubectl -n gitdoc-<slug> logs deploy/gitdoc-<slug>-rag --tail=500 \
+    | jq -c 'select(.level == "ERROR")'
+
+  # "What was slow?" — the 10 slowest completions in the last 500 lines.
+  kubectl logs deploy/gitdoc-<slug>-rag --tail=500 \
+    | jq -c 'select(.event == "ask.completed")' \
+    | jq -s 'sort_by(-.latency_ms) | .[:10]'
+
+  # "Trace a single user question." — grab the query_id from the bot's
+  # bot.ask event, then filter bot + rag logs by it.
+  kubectl logs deploy/gitdoc-<slug>-bot --tail=200 \
+    | jq -c 'select(.event == "bot.ask")'
+  # -> note a query_id, then:
+  Q=<query_id>
+  kubectl logs deploy/gitdoc-<slug>-bot --tail=500 \
+    | jq -c "select(.query_id == \"$Q\")"
+  ```
+
+- **Ingestion run summaries live in logs AND in the `ingest_runs` table.**
+  For cron-on-schedule, `ingest.complete` emits `duration_ms`, `chunks`,
+  `deleted` — the fast triage path. For historical comparison (e.g.
+  "has throughput regressed?") query:
+  ```sql
+  SELECT repo,
+         count(*)        AS runs,
+         avg(chunk_count) AS avg_chunks,
+         max(finished_at - started_at) AS slowest
+  FROM ingest_runs
+  WHERE status = 'ok' AND started_at > now() - interval '7 days'
+  GROUP BY repo;
+  ```
+
+- **Token-cost sanity check.** Multiplying the counters by the LiteLLM
+  cost table is the "are we on budget?" first-order answer:
+  ```promql
+  sum(increase(gitdoc_tokens_completion_total[1d])) by (model)
+  ```
+  divided by whatever the provider charges per million tokens. Build a
+  per-repo dashboard row here — the labels are already in place.
+
+- **Metric naming contract.** `gitdoc_*` prefix on every exposed metric.
+  Do NOT add a metric without a `repo` label on business counters — the
+  homelab runs one rag per repo and we need per-instance rollups. If a
+  new metric is truly repo-independent (e.g. a worker-pool gauge), omit
+  the label rather than hardcoding it. The handful of metrics defined
+  today are in `services/rag/metrics.py`.
+
+- **JSON log field stability.** Downstream dashboards / alerts will
+  grep on the `event` key. Changing the **name** of an event is a
+  breaking change; adding fields is free. Rename events only with a
+  deprecation window (emit both the old and new name for one release
+  cycle).
+
+- **What metrics to wire into alerts first.** Four alerts identified in
+  the task brief: token-burn rate, p99 ask latency, zero-retrieval ratio,
+  ingestion failure. PromQL templates for all four live in
+  `docs/observability.md` — copy them into the operator's alerting stack
+  verbatim, tune thresholds to the instance.

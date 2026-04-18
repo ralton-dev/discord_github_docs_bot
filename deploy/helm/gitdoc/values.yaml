@@ -117,3 +117,17 @@ webhook:
   # "ok" means last successful ingestion within this many seconds.
   # GET /status/ingestion?repo=<slug> reports this as "ok" or "stale".
   stalenessThresholdSecs: 7200
+
+# Observability (plan 09). The rag Service exposes /metrics in Prometheus
+# text format unconditionally; this block controls whether a ServiceMonitor
+# custom resource is rendered so the Prometheus Operator picks it up. Leave
+# disabled on clusters without the operator CRDs installed.
+observability:
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    # Extra labels merged into ServiceMonitor.metadata.labels so operators
+    # can use their `serviceMonitorSelector` (commonly requires a label like
+    # `release: kube-prometheus-stack`).
+    labels: {}

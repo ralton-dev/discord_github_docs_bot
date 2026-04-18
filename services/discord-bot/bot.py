@@ -1,15 +1,15 @@
 import logging
 import os
 import re
+import uuid
 
 import discord
 import httpx
 from discord import app_commands
 
-logging.basicConfig(
-    level=os.environ.get("LOG_LEVEL", "INFO"),
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
-)
+from logging_config import configure as configure_logging
+
+configure_logging()
 log = logging.getLogger("gitdoc.bot")
 
 RAG_URL = os.environ["RAG_ORCHESTRATOR_URL"]
@@ -207,17 +207,50 @@ async def ask(
         )
         return
 
+    query_id = str(uuid.uuid4())
+    log.info(
+        "bot ask",
+        extra={
+            "event": "bot.ask",
+            "query_id": query_id,
+            "guild_id": interaction.guild_id,
+            "repo": REPO,
+            "single": single,
+        },
+    )
+
     await interaction.response.defer(thinking=True)
     try:
         data = await _ask_orchestrator(query)
     except Exception:
-        log.exception("rag call failed")
+        log.exception(
+            "rag call failed",
+            extra={
+                "event": "bot.response",
+                "query_id": query_id,
+                "guild_id": interaction.guild_id,
+                "repo": REPO,
+                "response_chars": 0,
+                "outcome": "error",
+            },
+        )
         await interaction.followup.send(
             "Something went wrong reaching the knowledge base. Try again shortly."
         )
         return
 
     formatted = _format(data["answer"], data.get("citations", []))
+    log.info(
+        "bot response",
+        extra={
+            "event": "bot.response",
+            "query_id": query_id,
+            "guild_id": interaction.guild_id,
+            "repo": REPO,
+            "response_chars": len(formatted),
+            "outcome": "ok" if data.get("citations") else "empty",
+        },
+    )
 
     # Single-turn opt-out path: behaves exactly like the original bot.
     if single:
@@ -259,19 +292,52 @@ async def on_message(message: discord.Message) -> None:
     if not await _is_bot_thread(thread):
         return
 
+    query_id = str(uuid.uuid4())
+    log.info(
+        "bot thread followup",
+        extra={
+            "event": "bot.thread_followup",
+            "query_id": query_id,
+            "guild_id": message.guild.id if message.guild else None,
+            "repo": REPO,
+        },
+    )
+
     history = await _collect_thread_history(thread)
     try:
         data = await _ask_orchestrator(message.content, history=history)
     except Exception:
-        log.exception("rag call failed for thread follow-up")
+        log.exception(
+            "rag call failed for thread follow-up",
+            extra={
+                "event": "bot.response",
+                "query_id": query_id,
+                "guild_id": message.guild.id if message.guild else None,
+                "repo": REPO,
+                "response_chars": 0,
+                "outcome": "error",
+            },
+        )
         await thread.send(
             "Something went wrong reaching the knowledge base. Try again shortly.",
             silent=True,
         )
         return
 
+    formatted = _format(data["answer"], data.get("citations", []))
+    log.info(
+        "bot response",
+        extra={
+            "event": "bot.response",
+            "query_id": query_id,
+            "guild_id": message.guild.id if message.guild else None,
+            "repo": REPO,
+            "response_chars": len(formatted),
+            "outcome": "ok" if data.get("citations") else "empty",
+        },
+    )
     await thread.send(
-        _format(data["answer"], data.get("citations", [])),
+        formatted,
         silent=True,  # MessageFlags(suppress_notifications=True)
     )
 
@@ -301,7 +367,10 @@ async def _is_bot_thread(thread: "discord.Thread") -> bool:
 
 @client.event
 async def on_ready():
-    log.info("logged in as %s (repo=%s)", client.user, REPO)
+    log.info(
+        "logged in as %s (repo=%s)" % (client.user, REPO),
+        extra={"event": "bot.ready", "repo": REPO},
+    )
     await tree.sync()
 
 

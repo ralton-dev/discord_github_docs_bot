@@ -7,17 +7,17 @@ from typing import Any
 import psycopg
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from openai import OpenAI
 from pgvector.psycopg import register_vector
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 
+import metrics
+from logging_config import configure as configure_logging
 from webhook import RateLimiter, SignatureError, verify_signature
 
-logging.basicConfig(
-    level=os.environ.get("LOG_LEVEL", "INFO"),
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
-)
+configure_logging()
 log = logging.getLogger("gitdoc.rag")
 
 LITELLM_BASE = os.environ["LITELLM_BASE_URL"]
@@ -88,47 +88,99 @@ def _retrieve(repo: str, embedding: list[float], top_k: int):
 
 @app.post("/ask", response_model=AskResponse)
 def ask(req: AskRequest):
+    start = time.perf_counter()
+    status = "error"
+    hits = 0
+    prompt_tokens = 0
+    completion_tokens = 0
+    model = CHAT_MODEL
+    log.info(
+        "ask request received",
+        extra={
+            "event": "ask.received",
+            "repo": req.repo,
+            "query_chars": len(req.query),
+        },
+    )
     try:
-        emb = llm.embeddings.create(model=EMBED_MODEL, input=req.query).data[0].embedding
-    except Exception as exc:
-        log.exception("embedding call failed")
-        raise HTTPException(status_code=502, detail="embedding backend unavailable") from exc
+        try:
+            with metrics.timed(metrics.EMBED_LATENCY_SECONDS, req.repo):
+                emb = (
+                    llm.embeddings.create(model=EMBED_MODEL, input=req.query)
+                    .data[0].embedding
+                )
+        except Exception as exc:
+            log.exception("embedding call failed")
+            raise HTTPException(
+                status_code=502, detail="embedding backend unavailable"
+            ) from exc
 
-    rows = _retrieve(req.repo, emb, req.top_k)
-    if not rows:
+        rows = _retrieve(req.repo, emb, req.top_k)
+        hits = len(rows)
+        metrics.RETRIEVAL_HITS.labels(req.repo).observe(hits)
+
+        if not rows:
+            status = "empty"
+            return AskResponse(
+                answer=(
+                    "I couldn't find anything relevant in the knowledge "
+                    "base for that question."
+                ),
+                citations=[],
+            )
+
+        context_blocks = [
+            f"## {path} ({ctype})\n{content}"
+            for path, _sha, content, ctype in rows
+        ]
+        user_prompt = (
+            "Context:\n\n"
+            + "\n\n---\n\n".join(context_blocks)
+            + f"\n\nQuestion: {req.query}"
+        )
+
+        try:
+            with metrics.timed(metrics.CHAT_LATENCY_SECONDS, req.repo, model):
+                completion = llm.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user",   "content": user_prompt},
+                    ],
+                    temperature=0.1,
+                    max_tokens=1024,
+                )
+        except Exception as exc:
+            log.exception("chat call failed")
+            raise HTTPException(
+                status_code=502, detail="chat backend unavailable"
+            ) from exc
+
+        prompt_tokens, completion_tokens = metrics.record_chat_usage(
+            completion, req.repo, model,
+        )
+        status = "ok"
         return AskResponse(
-            answer="I couldn't find anything relevant in the knowledge base for that question.",
-            citations=[],
+            answer=completion.choices[0].message.content or "",
+            citations=[Citation(path=p, commit_sha=s) for p, s, _, _ in rows],
         )
-
-    context_blocks = [
-        f"## {path} ({ctype})\n{content}"
-        for path, _sha, content, ctype in rows
-    ]
-    user_prompt = (
-        "Context:\n\n"
-        + "\n\n---\n\n".join(context_blocks)
-        + f"\n\nQuestion: {req.query}"
-    )
-
-    try:
-        completion = llm.chat.completions.create(
-            model=CHAT_MODEL,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user",   "content": user_prompt},
-            ],
-            temperature=0.1,
-            max_tokens=1024,
+    finally:
+        elapsed = time.perf_counter() - start
+        metrics.LATENCY_SECONDS.labels("ask").observe(elapsed)
+        metrics.QUERIES_TOTAL.labels(req.repo, status).inc()
+        log.info(
+            "ask completed",
+            extra={
+                "event": "ask.completed",
+                "repo": req.repo,
+                "status": status,
+                "latency_ms": int(elapsed * 1000),
+                "hits": hits,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "model": model,
+            },
         )
-    except Exception as exc:
-        log.exception("chat call failed")
-        raise HTTPException(status_code=502, detail="chat backend unavailable") from exc
-
-    return AskResponse(
-        answer=completion.choices[0].message.content or "",
-        citations=[Citation(path=p, commit_sha=s) for p, s, _, _ in rows],
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -387,6 +439,20 @@ def readyz():
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"db unavailable: {exc}") from exc
     return {"ok": True}
+
+
+@app.get("/metrics")
+def prometheus_metrics():
+    """Expose Prometheus metrics from the default global registry.
+
+    Returns the standard text exposition format that Prometheus scrapers
+    (including the Prometheus Operator's ServiceMonitor) expect. See
+    `services/rag/metrics.py` for the list of metrics and their labels.
+    """
+    return Response(
+        content=generate_latest(),
+        media_type=CONTENT_TYPE_LATEST,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -128,3 +128,19 @@ models:
 # ---------------------------------------------------------------------------
 ingestion:
   schedule: "0 */6 * * *"
+
+# ---------------------------------------------------------------------------
+# Observability — Prometheus scraping. Leave disabled on clusters that do
+# not run the Prometheus Operator (the CRD 'monitoring.coreos.com/v1
+# ServiceMonitor' must exist). Metrics are exposed on /metrics of the rag
+# Service either way. See docs/observability.md.
+# ---------------------------------------------------------------------------
+# observability:
+#   serviceMonitor:
+#     enabled: true
+#     interval: 30s
+#     scrapeTimeout: 10s
+#     # Match whatever label your Prometheus instance's
+#     # `serviceMonitorSelector` requires:
+#     labels:
+#       release: kube-prometheus-stack

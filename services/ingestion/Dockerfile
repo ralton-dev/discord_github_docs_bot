@@ -13,7 +13,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-COPY ingest.py .
+COPY ingest.py logging_config.py ./
 
 RUN useradd -u 10001 -m app
 USER 10001

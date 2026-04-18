@@ -1,0 +1,38 @@
+{{- /*
+Prometheus Operator ServiceMonitor for the rag Service.
+
+Gated behind `observability.serviceMonitor.enabled` because the CRD is only
+present on clusters that run the Prometheus Operator. Homelab installs
+without the operator leave this disabled (the default) and everything else
+in the chart still applies.
+
+The operator's `serviceMonitorSelector` decides which ServiceMonitor
+resources each Prometheus instance picks up. Operators commonly require a
+specific label (e.g. `release: kube-prometheus-stack`) — set that via
+`observability.serviceMonitor.labels` so this chart stays operator-agnostic.
+*/}}
+{{- if .Values.observability.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "gitdoc.fullname" . }}-rag
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gitdoc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rag
+    {{- with .Values.observability.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "gitdoc.selector.rag" . | nindent 6 }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.observability.serviceMonitor.interval | quote }}
+      scrapeTimeout: {{ .Values.observability.serviceMonitor.scrapeTimeout | quote }}
+{{- end }}

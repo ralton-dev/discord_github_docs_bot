@@ -4,6 +4,11 @@ pydantic>=2.9,<3
 psycopg[binary]>=3.2,<4
 pgvector>=0.3,<1
 openai>=1.50,<2
+# prometheus-client exposes /metrics in the standard Prometheus text format.
+# We define metrics by hand (per-repo labels, retrieval hits) rather than use
+# prometheus-fastapi-instrumentator — the instrumentator's out-of-the-box
+# metrics are too generic for the domain labels we need.
+prometheus-client>=0.20,<1
 # kubernetes — used by /webhook to spawn Jobs from the ingestion CronJob.
 # Imported lazily inside the _K8sDeps wrapper so unit tests that never hit
 # that endpoint can skip installing the client.

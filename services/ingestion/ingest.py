@@ -3,6 +3,7 @@ import os
 import pathlib
 import subprocess
 import tempfile
+import time
 from urllib.parse import urlparse, urlunparse
 
 import psycopg
@@ -10,10 +11,9 @@ from langchain_text_splitters import Language, RecursiveCharacterTextSplitter
 from openai import OpenAI
 from pgvector.psycopg import register_vector
 
-logging.basicConfig(
-    level=os.environ.get("LOG_LEVEL", "INFO"),
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
-)
+from logging_config import configure as configure_logging
+
+configure_logging()
 log = logging.getLogger("gitdoc.ingest")
 
 REPO_URL     = os.environ["REPO_URL"]
@@ -92,7 +92,10 @@ def iter_chunks(root: pathlib.Path):
             continue
         try:
             if p.stat().st_size > MAX_FILE_BYTES:
-                log.info("skipping large file %s", p)
+                log.info(
+                    "skipping large file %s" % p,
+                    extra={"event": "ingest.skip_large", "path": str(p)},
+                )
                 continue
             text = p.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
@@ -105,10 +108,27 @@ def iter_chunks(root: pathlib.Path):
 
 
 def main() -> None:
+    started = time.perf_counter()
+    log.info(
+        "ingest start",
+        extra={
+            "event": "ingest.start",
+            "repo": REPO_NAME,
+            "url": REPO_URL,
+            "branch": BRANCH,
+        },
+    )
     with tempfile.TemporaryDirectory(prefix="repo-") as tmp:
         root = pathlib.Path(tmp)
         sha = clone(root)
-        log.info("cloned %s@%s", REPO_NAME, sha)
+        log.info(
+            "cloned %s@%s" % (REPO_NAME, sha),
+            extra={
+                "event": "ingest.cloned",
+                "repo": REPO_NAME,
+                "sha": sha,
+            },
+        )
 
         with psycopg.connect(PG_DSN, autocommit=True) as conn:
             register_vector(conn)
@@ -141,7 +161,15 @@ def main() -> None:
                         ],
                     )
                 total += len(batch)
-                log.info("upserted %d chunks (total=%d)", len(batch), total)
+                log.info(
+                    "upserted %d chunks (total=%d)" % (len(batch), total),
+                    extra={
+                        "event": "ingest.batch",
+                        "repo": REPO_NAME,
+                        "batch_size": len(batch),
+                        "total": total,
+                    },
+                )
 
             try:
                 for row in iter_chunks(root):
@@ -155,17 +183,46 @@ def main() -> None:
                     "DELETE FROM chunks WHERE repo=%s AND commit_sha<>%s",
                     (REPO_NAME, sha),
                 ).rowcount
-                log.info("garbage-collected %d old chunks", deleted)
+                log.info(
+                    "garbage-collected %d old chunks" % deleted,
+                    extra={
+                        "event": "ingest.gc",
+                        "repo": REPO_NAME,
+                        "deleted": deleted,
+                    },
+                )
 
                 conn.execute(
                     "UPDATE ingest_runs SET finished_at=now(), chunk_count=%s, status='ok' "
                     "WHERE id=%s",
                     (total, run_id),
                 )
+                duration_ms = int((time.perf_counter() - started) * 1000)
+                log.info(
+                    "ingest complete",
+                    extra={
+                        "event": "ingest.complete",
+                        "repo": REPO_NAME,
+                        "sha": sha,
+                        "chunks": total,
+                        "deleted": deleted,
+                        "duration_ms": duration_ms,
+                    },
+                )
             except Exception:
+                duration_ms = int((time.perf_counter() - started) * 1000)
                 conn.execute(
                     "UPDATE ingest_runs SET finished_at=now(), status='failed' WHERE id=%s",
                     (run_id,),
+                )
+                log.exception(
+                    "ingest failed",
+                    extra={
+                        "event": "ingest.failed",
+                        "repo": REPO_NAME,
+                        "sha": sha,
+                        "duration_ms": duration_ms,
+                    },
                 )
                 raise
 
