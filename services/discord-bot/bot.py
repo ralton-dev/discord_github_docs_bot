@@ -96,6 +96,12 @@ async def _open_followup_thread(
                     name=name,
                     auto_archive_duration=THREAD_AUTO_ARCHIVE_MINUTES,
                 )
+        except discord.Forbidden:
+            # Expected + user-fixable: bot lacks Read Message History or
+            # Create Public Threads in this channel. The caller will
+            # degrade to posting chunks inline; a final WARNING is
+            # emitted up there so we don't double-log here.
+            pass
         except (discord.HTTPException, ValueError):
             log.exception("strategy 1 (message.create_thread) failed")
 
@@ -109,16 +115,21 @@ async def _open_followup_thread(
                 auto_archive_duration=THREAD_AUTO_ARCHIVE_MINUTES,
                 type=discord.ChannelType.public_thread,
             )
-        except (discord.HTTPException, TypeError):
-            # TypeError: `type=` unsupported in some older discord.py
-            # versions. Retry without it.
+        except discord.Forbidden:
+            pass
+        except TypeError:
+            # `type=` unsupported in some older discord.py versions.
             try:
                 return await channel.create_thread(
                     name=name,
                     auto_archive_duration=THREAD_AUTO_ARCHIVE_MINUTES,
                 )
+            except discord.Forbidden:
+                pass
             except discord.HTTPException:
                 log.exception("strategy 2 (channel.create_thread) failed")
+        except discord.HTTPException:
+            log.exception("strategy 2 (channel.create_thread) failed")
 
     return None
 
@@ -585,9 +596,27 @@ async def ask(
             for part in messages[1:]:
                 await thread.send(part, silent=True)
         else:
-            # No thread — fall back to spamming remaining chunks as
-            # followups on the original interaction so the user at least
-            # sees the full answer.
+            # No thread available (bot lacks channel perms, or the
+            # channel type doesn't support threads, etc.). NOT an error
+            # — the answer still lands via interaction followups. Single
+            # WARNING so the operator can see the degrade in Grafana
+            # without an ERROR-level flood on every /ask.
+            log.warning(
+                "thread creation skipped; posting full answer inline",
+                extra={
+                    "event": "bot.thread_skipped",
+                    "query_id": query_id,
+                    "guild_id": interaction.guild_id,
+                    "channel_id": interaction.channel_id,
+                    "repo": REPO,
+                    "message_count": len(messages),
+                    "hint": (
+                        "bot likely lacks Create Public Threads or Read "
+                        "Message History in this channel; see "
+                        "docs/discord-setup.md"
+                    ),
+                },
+            )
             for part in messages[1:]:
                 await interaction.followup.send(part)
     except (discord.HTTPException, ValueError):
