@@ -147,9 +147,38 @@ jobs:
           file: services/${{ matrix.service }}/Dockerfile
           platforms: linux/amd64
           push: false
+          # Load the image into the local daemon so the next step can run
+          # it. `load: true` is only valid with a single platform.
+          load: true
           # GHA cache: shared across runs, scoped per service so the three
           # builds don't trash each other's cache.
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
           # Tag for local clarity in build logs only — never pushed.
           tags: gitdoc-${{ matrix.service }}:ci
+
+      - name: Smoke-import the service module
+        # Catches Dockerfile `COPY` drift and module-level import errors
+        # that unit tests (which run against the source tree) miss. Runs
+        # `python -c "import <entrypoint>"` inside the built image with
+        # dummy env vars that satisfy the module-level os.environ reads.
+        # Exits 0 only if every top-level import succeeds.
+        run: |
+          case "${{ matrix.service }}" in
+            rag)         module=app ;;
+            ingestion)   module=ingest ;;
+            discord-bot) module=bot ;;
+          esac
+          docker run --rm \
+            -e LITELLM_BASE_URL=http://ci.invalid:4000 \
+            -e LITELLM_API_KEY=sk-ci \
+            -e POSTGRES_DSN=postgresql://ci:ci@ci.invalid/ci \
+            -e REPO_URL=https://example.com/ci/repo.git \
+            -e REPO_NAME=ci \
+            -e GIT_TOKEN= \
+            -e RAG_ORCHESTRATOR_URL=http://ci.invalid:8000 \
+            -e TARGET_REPO=ci \
+            -e DISCORD_BOT_TOKEN=ci-token \
+            --entrypoint python \
+            "gitdoc-${{ matrix.service }}:ci" \
+            -c "import ${module}; print('import ok:', ${module}.__file__)"
