@@ -3,9 +3,10 @@
 Living doc. Update on every working session. Kept short on purpose — if a section grows past a page, promote it to a task file or an ADR.
 
 **Last updated:** 2026-04-18
-**Current phase:** 1 closing → entering Phase 2/3/4 work in waves 3 onward.
-**Waves done:** 1 (01, 02, 03, 06), 2 (04, 07, 08).
-**Operator-blocking before first live deploy:** push a `v0.1.0` tag (CI publishes images to GHCR), provision Postgres via `db/provision/`, fill `values-<slug>.yaml`, `make helm-install`, run `scripts/smoke-test.sh`. The agent has shipped everything needed up to that handover.
+**Current phase:** all coded phases shipped. Only plan 05 (runbook) remains — intentionally deferred until post-deploy.
+**Waves done:** 1 (01, 02, 03, 06), 2 (04, 07, 08), 4a (10, 15, 16), 4b (09, 17), 5 (11, 12, 13, 14). 16 of 17 plans complete; 05 open by design.
+**Tests:** 165 unit + 8 integration, all green.
+**Operator-blocking before first live deploy:** push a `v0.1.0` tag (CI publishes images to GHCR), mark GHCR packages Public, provision Postgres via `db/provision/`, fill `values-<slug>.yaml`, `make helm-install`, run `scripts/smoke-test.sh`. All code, docs, chart, and CI are in place.
 
 ---
 
@@ -20,10 +21,9 @@ Living doc. Update on every working session. Kept short on purpose — if a sect
 
 ## Current focus
 
-Wave 2 shipped (chart hardened + deploy procedure, integration suite, CI/release workflows). Next up:
-- **Wave 3:** plan 05 (operational runbook). Best written **after** the operator does the first real deploy and validates the procedures. Until then, the two appendices in plan 05 capture what the runbook must cover.
-- **Wave 4:** plans 09 (observability), 10 (secrets hardening), 15 (webhook ingestion), 16 (thread conversations), 17 (runtime model selection). Fully parallel.
-- **Wave 5:** plans 11 → 12 → 13 → 14 (RAG retrieval-path chain — serialised on `services/rag/app.py`).
+All waves shipped. Plan 05 (operational runbook) is the only open item — deferred by design until the operator has walked through a real deploy so the procedures are battle-tested. The runbook file already has eight appendices (from tasks 04, 08, 09, 10, 11, 12, 13, 14, 16, 17) capturing what it must cover.
+
+**Next action is on the operator:** push `v0.1.0`, deploy, run the smoke test, verify `/ask` from Discord. Then plan 05 gets written based on what surprised us in practice.
 
 ## In progress
 
@@ -87,6 +87,7 @@ _Nothing claimed yet._
 
 ## Recent decisions
 
+- **2026-04-18** Wave 5 complete. Hybrid search (BM25 + vector via RRF k=60, generated `content_tsv` column), cross-encoder reranker (off by default, pluggable HTTP shape, graceful-degrade on failure), query cache keyed on `(repo, commit_sha, query_hash)` with natural invalidation on new ingestion SHA, per-guild/per-user token rate limits with friendly 429 surfaced by the bot. All feature-flagged so operators can A/B or kill individual waves. 165 unit + 8 integration tests.
 - **2026-04-18** Service `rag-orchestrator` renamed to `rag` everywhere. Image is now `ghcr.io/ralton-dev/gitdoc-rag` (resolves the latent Makefile/chart name mismatch).
 - **2026-04-18** Registry = GHCR (`ghcr.io/ralton-dev`), public packages, no `regcred`. CI publishes via tag push using `GITHUB_TOKEN`.
 - **2026-04-18** Default chat model = `ollama_chat/llama3.2:3b`, runtime-overridable once plan 17 ships. Embedding stays `text-embedding-3-small` (changing it later invalidates every stored vector).
