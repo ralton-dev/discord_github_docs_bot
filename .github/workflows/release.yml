@@ -1,0 +1,86 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# No `concurrency` block: tag pushes are individual, immutable events; we
+# never want one to cancel another mid-publish.
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  REGISTRY_NAMESPACE: ralton-dev
+
+jobs:
+  build-and-push:
+    name: Build & push ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [discord-bot, rag, ingestion]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        # buildx + the gha cache do not need history; the default shallow
+        # clone is fine and faster.
+
+      - name: Compute tag values
+        id: tags
+        # ref_name on a tag push is the literal tag, e.g. "v0.1.0".
+        # short_sha mirrors `git rev-parse --short HEAD` (default 7 chars).
+        # We emit two image tags per service:
+        #   ghcr.io/<ns>/gitdoc-<svc>:vX.Y.Z
+        #   ghcr.io/<ns>/gitdoc-<svc>:vX.Y.Z-<short-sha>
+        run: |
+          version="${GITHUB_REF_NAME}"
+          short_sha="${GITHUB_SHA::7}"
+          image="${REGISTRY}/${REGISTRY_NAMESPACE}/gitdoc-${{ matrix.service }}"
+          {
+            echo "version=${version}"
+            echo "short_sha=${short_sha}"
+            echo "image=${image}"
+            echo "tag_version=${image}:${version}"
+            echo "tag_version_sha=${image}:${version}-${short_sha}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Set up QEMU (for arm64 emulation)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          # GITHUB_TOKEN with `packages: write` (granted at the job level
+          # above) is sufficient to push to ghcr.io/<owner>/* — no extra
+          # secret needed.
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push ${{ matrix.service }}
+        uses: docker/build-push-action@v6
+        with:
+          context: services/${{ matrix.service }}
+          file: services/${{ matrix.service }}/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.tags.outputs.tag_version }}
+            ${{ steps.tags.outputs.tag_version_sha }}
+          # Aggressive cache: `mode=max` stores every intermediate layer in
+          # the GHA cache. First release pays the upload cost; subsequent
+          # tag pushes (typical case: small bump after the cache is warm)
+          # complete in well under 5 minutes.
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+          # OCI annotations make the GHCR UI show useful provenance.
+          provenance: true
+          sbom: true
