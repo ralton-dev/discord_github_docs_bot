@@ -29,7 +29,7 @@ Rules:
 """
 
 llm = OpenAI(base_url=LITELLM_BASE, api_key=LITELLM_KEY)
-app = FastAPI(title="gitdoc-rag-orchestrator")
+app = FastAPI(title="gitdoc-rag")
 
 
 class AskRequest(BaseModel):

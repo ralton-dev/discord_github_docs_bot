@@ -23,6 +23,6 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 
 {{- define "gitdoc.selector.rag" -}}
 app.kubernetes.io/name: gitdoc
-app.kubernetes.io/component: rag-orchestrator
+app.kubernetes.io/component: rag
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}

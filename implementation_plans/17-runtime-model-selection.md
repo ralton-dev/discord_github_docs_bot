@@ -14,8 +14,8 @@ Iterating on which LLM to use shouldn't require a Helm upgrade. Switching is als
 
 ## Acceptance criteria
 - [ ] DB migration adds an `instance_settings` table (key/value, single row per `repo`) — at minimum a `chat_model` column. Apply via the existing Helm `db-migrate` Job.
-- [ ] `GET /models` on rag-orchestrator proxies LiteLLM's `/v1/models` endpoint and returns the list (cached for ~60s to avoid hammering LiteLLM).
-- [ ] `GET /settings?repo=<slug>` and `POST /settings` on rag-orchestrator read/write the active chat model for an instance.
+- [ ] `GET /models` on rag service proxies LiteLLM's `/v1/models` endpoint and returns the list (cached for ~60s to avoid hammering LiteLLM).
+- [ ] `GET /settings?repo=<slug>` and `POST /settings` on rag service read/write the active chat model for an instance.
 - [ ] `/ask` (existing) reads the active chat model from `instance_settings` first, falls back to `CHAT_MODEL` env var if unset.
 - [ ] New bot slash commands:
   - `/model list` — paginated list of available models from the orchestrator.
@@ -45,4 +45,4 @@ Iterating on which LLM to use shouldn't require a Helm upgrade. Switching is als
 
 ## Dependencies
 - Needs **04 (deploy first instance)** to validate against a live LiteLLM.
-- Touches `services/rag-orchestrator/app.py`, so it should slot **after** the Wave 5 chain (11 → 12 → 13 → 14) finishes, OR be done as a small standalone PR before that chain starts. Recommended: do it as part of Wave 4 (parallel with 09/10/15/16); the Wave 5 chain can rebase if needed.
+- Touches `services/rag/app.py`, so it should slot **after** the Wave 5 chain (11 → 12 → 13 → 14) finishes, OR be done as a small standalone PR before that chain starts. Recommended: do it as part of Wave 4 (parallel with 09/10/15/16); the Wave 5 chain can rebase if needed.

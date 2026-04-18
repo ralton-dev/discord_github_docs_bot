@@ -1,4 +1,4 @@
-"""Pytest conftest for the rag-orchestrator service tests.
+"""Pytest conftest for the rag service tests.
 
 `app.py` reads three required env vars at import time (`LITELLM_BASE_URL`,
 `LITELLM_API_KEY`, `POSTGRES_DSN`) and constructs an OpenAI client plus a

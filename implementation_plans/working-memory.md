@@ -47,7 +47,7 @@ _Nothing claimed yet._
 - **15 · Webhook ingestion** — new endpoint, orthogonal to everything else.
 - **16 · Thread conversations** — bot-side only, no orchestrator changes.
 
-**Wave 5 — RAG retrieval-path chain (serialise; all touch `rag-orchestrator/app.py`):**
+**Wave 5 — RAG retrieval-path chain (serialise; all touch `rag/app.py`):**
 1. **11 · Hybrid search** — broadens recall.
 2. **12 · Reranker** — filters candidates before the LLM.
 3. **13 · Query cache** — short-circuits on repeat questions.

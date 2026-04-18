@@ -1,44 +1,20 @@
 # Container registry
 
-gitdoc publishes three images:
+gitdoc publishes three images to **GitHub Container Registry** under the
+`ralton-dev` org:
 
-- `gitdoc-discord-bot`
-- `gitdoc-rag`
-- `gitdoc-ingestion`
+- `ghcr.io/ralton-dev/gitdoc-discord-bot`
+- `ghcr.io/ralton-dev/gitdoc-rag`
+- `ghcr.io/ralton-dev/gitdoc-ingestion`
 
-The registry host is **not yet chosen** (see
-`implementation_plans/working-memory.md`, "Registry" open question). Pick one
-of the three options below, then update `images.*.repository` in
-`deploy/helm/gitdoc/values.yaml` (and any per-repo `values-<repo>.yaml`)
-accordingly.
+These are **public packages** — no `regcred` Secret is needed in the cluster.
+The release CI workflow (`.github/workflows/release.yml`) pushes on tag push
+using the built-in `GITHUB_TOKEN`, so no extra secrets need to be configured.
 
-## Options
-
-### 1. GitHub Container Registry (GHCR)
-
-- Host: `ghcr.io/<org-or-user>`
-- Auth: Personal Access Token (PAT) with `write:packages` / `read:packages`,
-  or a GitHub Actions-issued token in CI.
-- Pros: free for public images, integrates with GitHub auth, no infra to run.
-- Cons: requires `regcred` (Kubernetes secret) when images are private.
-
-### 2. Harbor (homelab self-hosted)
-
-- Host: `harbor.<homelab-domain>/gitdoc`
-- Auth: Harbor robot account with push/pull on the `gitdoc` project.
-- Pros: on-prem, supports replication and vulnerability scanning, one-time
-  setup reused across projects.
-- Cons: operator burden (certs, backup, upgrades) — worth it only if Harbor
-  is already running for other homelab workloads.
-
-### 3. Local `registry:2`
-
-- Host: `registry.<homelab-domain>` (or a `NodePort`/`ClusterIP` exposed
-  internally).
-- Auth: typically none on the cluster network; restrict via NetworkPolicy.
-- Pros: trivial to deploy (single container), no external dependency.
-- Cons: no UI, no scanning, no HA; fine for a single-cluster homelab but
-  will be outgrown if more operators need it.
+> If you ever need to switch registries (Harbor, local `registry:2`, or
+> another GHCR org), override `REGISTRY=` on the Makefile, update
+> `images.*.repository` in `deploy/helm/gitdoc/values.yaml`, and create a
+> `regcred` Secret per the template at the bottom of this file.
 
 ## Pushing images
 

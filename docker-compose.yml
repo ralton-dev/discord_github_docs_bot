@@ -40,7 +40,7 @@ services:
 
   rag:
     build:
-      context: ./services/rag-orchestrator
+      context: ./services/rag
     environment:
       POSTGRES_DSN: ${POSTGRES_DSN:-postgresql://gitdoc:gitdoc@db:5432/gitdoc}
       LITELLM_BASE_URL: ${LITELLM_BASE_URL}

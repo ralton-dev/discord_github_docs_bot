@@ -1,18 +1,19 @@
 # ---------------------------------------------------------------------------
 # gitdoc Makefile
 #
-# Registry is INTENTIONALLY left as a placeholder (ghcr.io/you) until the
-# registry decision is made. See implementation_plans/working-memory.md
-# ("Registry" open question) and deploy/REGISTRY.md for the three options
-# under consideration (GHCR / Harbor / local registry:2). Override with:
+# Default registry is ghcr.io/ralton-dev (public images, no regcred needed).
+# Override for forks or alternate registries:
 #
 #   make build REGISTRY=ghcr.io/<org>
 #   make buildx-push REGISTRY=ghcr.io/<org>
+#
+# CI publishes on tag push (see .github/workflows/release.yml); local
+# build targets are mostly for ad-hoc verification.
 # ---------------------------------------------------------------------------
 
-REGISTRY  ?= ghcr.io/you
+REGISTRY  ?= ghcr.io/ralton-dev
 VERSION   ?= 0.1.0
-SERVICES  := discord-bot rag-orchestrator ingestion
+SERVICES  := discord-bot rag ingestion
 PLATFORMS ?= linux/amd64,linux/arm64
 
 # Resolved short SHA — empty when not in a git repo (e.g. tarball checkout).
@@ -25,7 +26,7 @@ else
 TAG ?= $(VERSION)-$(GIT_SHA)
 endif
 
-.PHONY: build buildx-push push print-tag lint helm-lint helm-template helm-install test
+.PHONY: build buildx-push push print-tag lint helm-lint helm-template helm-install test integration-test
 
 ## print-tag: echo the resolved image tag (useful for CI)
 print-tag:
@@ -64,9 +65,17 @@ buildx-push:
 ##   pip install -r requirements-dev.txt \
 ##               -r services/ingestion/requirements.txt \
 ##               -r services/discord-bot/requirements.txt \
-##               -r services/rag-orchestrator/requirements.txt
+##               -r services/rag/requirements.txt
+##
+## Integration tests (Docker-backed) are excluded by pytest.ini's default
+## addopts; run them via `make integration-test`.
 test:
 	pytest
+
+## integration-test: run the Docker-backed end-to-end suite.
+## Requires a running Docker daemon. See tests/integration/README.md.
+integration-test:
+	pytest -m integration -o addopts="-q" tests/integration
 
 helm-lint:
 	helm lint deploy/helm/gitdoc

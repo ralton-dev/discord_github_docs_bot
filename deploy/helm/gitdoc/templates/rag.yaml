@@ -4,7 +4,7 @@ metadata:
   name: {{ include "gitdoc.fullname" . }}-rag
   labels:
     {{- include "gitdoc.labels" . | nindent 4 }}
-    app.kubernetes.io/component: rag-orchestrator
+    app.kubernetes.io/component: rag
 spec:
   replicas: {{ .Values.ragOrchestrator.replicas }}
   selector:
@@ -15,6 +15,13 @@ spec:
       labels:
         {{- include "gitdoc.selector.rag" . | nindent 8 }}
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: app
           image: "{{ .Values.images.rag.repository }}:{{ .Values.images.rag.tag }}"
@@ -27,6 +34,10 @@ spec:
                 name: {{ include "gitdoc.fullname" . }}-config
             - secretRef:
                 name: {{ include "gitdoc.fullname" . }}-secrets
+          # Python / httpx / openai write transient files to /tmp; root FS is read-only.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           livenessProbe:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 20
@@ -39,10 +50,15 @@ spec:
             {{- toYaml .Values.ragOrchestrator.resources | nindent 12 }}
           securityContext:
             runAsNonRoot: true
+            runAsUser: 10001
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: "64Mi"
 ---
 apiVersion: v1
 kind: Service
@@ -50,7 +66,7 @@ metadata:
   name: {{ include "gitdoc.fullname" . }}-rag
   labels:
     {{- include "gitdoc.labels" . | nindent 4 }}
-    app.kubernetes.io/component: rag-orchestrator
+    app.kubernetes.io/component: rag
 spec:
   selector:
     {{- include "gitdoc.selector.rag" . | nindent 4 }}

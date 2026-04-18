@@ -1,4 +1,4 @@
-"""Sentinel test for the rag-orchestrator service.
+"""Sentinel test for the rag service.
 
 Goal: catch module-level breakage (bad imports, missing env-var reads,
 Pydantic model validation errors at class-definition time, etc.) without
@@ -15,7 +15,7 @@ def test_app_module_imports() -> None:
     import app
 
     assert app.app is not None, "FastAPI app instance must be exported"
-    assert app.app.title == "gitdoc-rag-orchestrator"
+    assert app.app.title == "gitdoc-rag"
 
 
 def test_ask_route_registered() -> None:
