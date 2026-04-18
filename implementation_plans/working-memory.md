@@ -4,6 +4,7 @@ Living doc. Update on every working session. Kept short on purpose — if a sect
 
 **Last updated:** 2026-04-18
 **Current phase:** 1 (MVP — ship to homelab)
+**Wave 1 status:** ✅ tasks 01, 02, 03, 06 done. Wave 2 blocked on the registry decision (task 02 surfaced) before task 04 can run.
 
 ---
 
@@ -18,7 +19,7 @@ Living doc. Update on every working session. Kept short on purpose — if a sect
 
 ## Current focus
 
-Scaffold is complete (services, Dockerfiles, Helm chart, DB schema). Next up: Phase 1 — get one instance running end-to-end in the homelab cluster.
+Wave 1 shipped (compose, build/registry doc, Postgres provisioning scripts, unit-test harness). Next up: Wave 2 — task 04 (deploy first instance), 07 (integration tests), 08 (CI). Task 04 is blocked on the registry decision; 07 and 08 can proceed once 04 starts.
 
 ## In progress
 
@@ -82,6 +83,8 @@ _Nothing claimed yet._
 
 ## Recent decisions
 
+- **2026-04-18** Wave 1 complete (01 compose, 02 build/registry-docs, 03 Postgres provisioning scripts, 06 unit tests). 29/29 unit tests pass; `docker compose config` validates; `helm lint` clean.
+- **2026-04-18** Image tag scheme = `<VERSION>-<short-sha>` (e.g. `0.1.0-9b83072`). Bump `VERSION` in Makefile for semver level changes.
 - **2026-04-18** pgvector HNSW index (not IVFFlat) — no training step, good recall at homelab scale.
 - **2026-04-18** OpenAI-compatible client against LiteLLM, not per-provider SDKs — single code path, LiteLLM handles routing.
 - **2026-04-18** One Helm chart, one values file per repo, one namespace per instance — clean RBAC and per-instance secrets.
