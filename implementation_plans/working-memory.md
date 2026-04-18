@@ -91,6 +91,9 @@ _Nothing claimed yet._
 - **2026-04-18** Registry = GHCR (`ghcr.io/ralton-dev`), public packages, no `regcred`. CI publishes via tag push using `GITHUB_TOKEN`.
 - **2026-04-18** Default chat model = `ollama_chat/llama3.2:3b`, runtime-overridable once plan 17 ships. Embedding stays `text-embedding-3-small` (changing it later invalidates every stored vector).
 - **2026-04-18** Plan 17 added (Wave 4): per-instance chat model in DB, `/model list/current/set` slash commands, gated by Discord's built-in `Manage Server` permission. No custom roles or user allowlists for now.
+- **2026-04-18** Wave 4a complete (10 sealed-secrets + existingSecret gate, 15 /webhook + /status/ingestion + RBAC + docs, 16 thread-aware conversations with graceful 422 fallback). 58 unit + 4 integration tests pass; helm lint + template clean in all three modes (default / existingSecret / webhook.enabled).
+- **2026-04-18** Secrets flow = **sealed-secrets** (plan 10). Steady-state: operator seals a plain Secret with `kubeseal`, commits sealed manifest under `deploy/sealed-secrets/`, points `secrets.existingSecret` at its name. Bootstrap path (plaintext via `secrets.*`) kept for first-deploy-before-sealed-secrets-installed.
+- **2026-04-18** Bot requires **Message Content Intent** privileged (enabled in code; operator must toggle in Discord Developer Portal) — needed for plan 16 thread follow-ups.
 - **2026-04-18** Wave 2 complete (04 deploy package + chart hardening, 07 integration tests with testcontainers, 08 CI/release workflows). 29 unit + 4 integration tests pass; `helm lint`/`template`/`compose config` clean. **Cluster-side steps (push tag, provision Postgres, helm install, smoke test) remain on the operator.**
 - **2026-04-18** Wave 1 complete (01 compose, 02 build/registry-docs, 03 Postgres provisioning scripts, 06 unit tests).
 - **2026-04-18** Image tag scheme = `<VERSION>-<short-sha>` (e.g. `0.1.0-9b83072`). Bump `VERSION` in Makefile for semver level changes.

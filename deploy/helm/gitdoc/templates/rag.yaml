@@ -15,6 +15,9 @@ spec:
       labels:
         {{- include "gitdoc.selector.rag" . | nindent 8 }}
     spec:
+      {{- if .Values.webhook.enabled }}
+      serviceAccountName: {{ include "gitdoc.fullname" . }}-rag
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -33,7 +36,20 @@ spec:
             - configMapRef:
                 name: {{ include "gitdoc.fullname" . }}-config
             - secretRef:
-                name: {{ include "gitdoc.fullname" . }}-secrets
+                name: {{ include "gitdoc.secretName" . }}
+          {{- if .Values.webhook.enabled }}
+          env:
+            # POD_NAMESPACE + INGEST_CRONJOB_NAME tell the /webhook handler
+            # which CronJob to clone when spawning an ad-hoc ingestion Job.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: INGEST_CRONJOB_NAME
+              value: "{{ include "gitdoc.fullname" . }}-ingest"
+            - name: STALENESS_THRESHOLD_SECS
+              value: "{{ .Values.webhook.stalenessThresholdSecs }}"
+          {{- end }}
           # Python / httpx / openai write transient files to /tmp; root FS is read-only.
           volumeMounts:
             - name: tmp

@@ -1,0 +1,47 @@
+{{- /*
+RBAC for the webhook-driven ingestion flow (plan 15). Only rendered when
+webhook.enabled=true. The rag Deployment uses this ServiceAccount to read
+the ingestion CronJob's jobTemplate and create ad-hoc Jobs from it. Scoped
+to the chart namespace — no ClusterRole.
+*/}}
+{{- if .Values.webhook.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "gitdoc.fullname" . }}-rag
+  labels:
+    {{- include "gitdoc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rag
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "gitdoc.fullname" . }}-rag-webhook
+  labels:
+    {{- include "gitdoc.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["get", "list"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list"]
+  - apiGroups: ["batch"]
+    resources: ["jobs/status"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "gitdoc.fullname" . }}-rag-webhook
+  labels:
+    {{- include "gitdoc.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "gitdoc.fullname" . }}-rag-webhook
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "gitdoc.fullname" . }}-rag
+    namespace: {{ .Release.Namespace }}
+{{- end }}
