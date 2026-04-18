@@ -31,3 +31,14 @@ CREATE TABLE IF NOT EXISTS ingest_runs (
     chunk_count   INT,
     status        TEXT NOT NULL DEFAULT 'running'
 );
+
+-- Per-instance mutable settings. Currently only chat_model, set via the
+-- Discord bot's /model set command and read by the /ask handler on every
+-- request (with a short-lived in-process cache). updated_by records the
+-- Discord user ID for audit/rotation.
+CREATE TABLE IF NOT EXISTS instance_settings (
+    repo        TEXT PRIMARY KEY,
+    chat_model  TEXT,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_by  TEXT
+);

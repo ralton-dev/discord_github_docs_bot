@@ -54,6 +54,65 @@ app = FastAPI(title="gitdoc-rag")
 # request handlers via dependency injection so tests can swap it out.
 _rate_limiter = RateLimiter(interval_secs=60.0)
 
+# Runtime model selection (plan 17).
+#
+# /models proxies LiteLLM's /v1/models and caches the result for 60s so
+# autocomplete from the Discord bot doesn't hammer the backend. The per-repo
+# chat_model lookup caches for 15s so /ask doesn't touch Postgres on every
+# hot query. Both caches accept an injectable clock via the module-level
+# _clock hook so tests can age the cache deterministically without sleeping.
+_MODELS_TTL = 60.0
+_SETTINGS_TTL = 15.0
+_clock = time.monotonic
+_models_cache: dict[str, Any] = {"data": [], "fetched_at": -1e18}
+_settings_cache: dict[str, tuple[str | None, float]] = {}
+
+
+def _fetch_models(force: bool = False) -> list[str]:
+    """Return model IDs from LiteLLM, cached for _MODELS_TTL seconds."""
+    now = _clock()
+    if not force and (now - _models_cache["fetched_at"]) < _MODELS_TTL:
+        return list(_models_cache["data"])
+    resp = llm.models.list()
+    ids = [m.id for m in resp.data]
+    _models_cache["data"] = ids
+    _models_cache["fetched_at"] = now
+    return list(ids)
+
+
+def _invalidate_models_cache() -> None:
+    _models_cache["fetched_at"] = -1e18
+
+
+def _get_chat_model_for_repo(repo: str) -> str:
+    """Return the active chat model for ``repo``.
+
+    Resolves to ``instance_settings.chat_model`` if set, otherwise the
+    ``CHAT_MODEL`` env-var default. Cached per-repo for _SETTINGS_TTL so
+    /ask does not touch Postgres on every request. The cache stores the
+    resolved string (default or override) as a tuple ``(value, fetched_at)``.
+    """
+    now = _clock()
+    cached = _settings_cache.get(repo)
+    if cached is not None and (now - cached[1]) < _SETTINGS_TTL:
+        return cached[0] or CHAT_MODEL
+    try:
+        with psycopg.connect(PG_DSN, connect_timeout=3, autocommit=True) as conn:
+            row = conn.execute(
+                "SELECT chat_model FROM instance_settings WHERE repo = %s",
+                (repo,),
+            ).fetchone()
+    except Exception:
+        log.exception("instance_settings lookup failed; falling back to env default")
+        return CHAT_MODEL
+    chat_model = row[0] if row and row[0] else None
+    _settings_cache[repo] = (chat_model, now)
+    return chat_model or CHAT_MODEL
+
+
+def _invalidate_settings_cache(repo: str) -> None:
+    _settings_cache.pop(repo, None)
+
 
 class AskRequest(BaseModel):
     query: str = Field(min_length=1, max_length=2000)
@@ -93,7 +152,9 @@ def ask(req: AskRequest):
     hits = 0
     prompt_tokens = 0
     completion_tokens = 0
-    model = CHAT_MODEL
+    # Resolve the active model per-request (plan 17). Cache means this is
+    # cheap on the hot path; falls back to CHAT_MODEL when no override is set.
+    model = _get_chat_model_for_repo(req.repo)
     log.info(
         "ask request received",
         extra={
@@ -423,6 +484,131 @@ def ingestion_status(repo: str):
         last_success_at=finished_at.isoformat(),
         seconds_since_last_success=delta,
         status=status,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Model selection (plan 17)
+# ---------------------------------------------------------------------------
+
+
+class ModelInfo(BaseModel):
+    id: str
+
+
+class ModelsResponse(BaseModel):
+    data: list[ModelInfo]
+
+
+class SettingsResponse(BaseModel):
+    repo: str
+    chat_model: str | None
+    updated_at: str | None
+    updated_by: str | None
+
+
+class SettingsUpdate(BaseModel):
+    repo: str = Field(min_length=1)
+    chat_model: str = Field(min_length=1)
+    updated_by: str | None = None
+
+
+@app.get("/models", response_model=ModelsResponse)
+def list_models():
+    """Proxy LiteLLM's /v1/models with a 60s in-process cache.
+
+    Returned shape matches OpenAI's: ``{"data": [{"id": "..."}, ...]}`` so the
+    Discord bot and any external tooling can reuse the same parser.
+    """
+    try:
+        ids = _fetch_models()
+    except Exception as exc:
+        log.exception("LiteLLM /v1/models proxy failed")
+        raise HTTPException(status_code=502, detail=f"models backend unavailable: {exc}") from exc
+    return ModelsResponse(data=[ModelInfo(id=i) for i in ids])
+
+
+@app.get("/settings", response_model=SettingsResponse)
+def get_settings(repo: str):
+    """Return the persisted instance settings for ``repo``.
+
+    Absent row → ``chat_model: null`` (not 404), so the bot can render
+    "using default" without branching on error shape.
+    """
+    if not repo:
+        raise HTTPException(status_code=400, detail="repo query param is required")
+    try:
+        with psycopg.connect(PG_DSN, connect_timeout=3, autocommit=True) as conn:
+            row = conn.execute(
+                """
+                SELECT chat_model, updated_at, updated_by
+                FROM instance_settings
+                WHERE repo = %s
+                """,
+                (repo,),
+            ).fetchone()
+    except Exception as exc:
+        log.exception("instance_settings GET failed")
+        raise HTTPException(status_code=503, detail=f"db unavailable: {exc}") from exc
+    if row is None:
+        return SettingsResponse(
+            repo=repo, chat_model=None, updated_at=None, updated_by=None,
+        )
+    chat_model, updated_at, updated_by = row
+    return SettingsResponse(
+        repo=repo,
+        chat_model=chat_model,
+        updated_at=updated_at.isoformat() if updated_at else None,
+        updated_by=updated_by,
+    )
+
+
+@app.post("/settings", response_model=SettingsResponse)
+def update_settings(body: SettingsUpdate):
+    """Upsert the chat model for ``body.repo``.
+
+    Validates ``body.chat_model`` against the cached /v1/models list; 400
+    with the full available list when the name is unknown, so the client
+    can render an actionable error.
+    """
+    try:
+        available = _fetch_models()
+    except Exception as exc:
+        log.exception("could not fetch models for validation")
+        raise HTTPException(status_code=502, detail=f"models backend unavailable: {exc}") from exc
+    if body.chat_model not in available:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": f"unknown model: {body.chat_model}",
+                "available": available,
+            },
+        )
+    try:
+        with psycopg.connect(PG_DSN, connect_timeout=3, autocommit=True) as conn:
+            row = conn.execute(
+                """
+                INSERT INTO instance_settings (repo, chat_model, updated_at, updated_by)
+                VALUES (%s, %s, now(), %s)
+                ON CONFLICT (repo) DO UPDATE
+                SET chat_model = EXCLUDED.chat_model,
+                    updated_at = now(),
+                    updated_by = EXCLUDED.updated_by
+                RETURNING chat_model, updated_at, updated_by
+                """,
+                (body.repo, body.chat_model, body.updated_by),
+            ).fetchone()
+    except Exception as exc:
+        log.exception("instance_settings POST failed")
+        raise HTTPException(status_code=503, detail=f"db unavailable: {exc}") from exc
+    # Hot path wins — drop any cached value so the next /ask picks this up.
+    _invalidate_settings_cache(body.repo)
+    chat_model, updated_at, updated_by = row
+    return SettingsResponse(
+        repo=body.repo,
+        chat_model=chat_model,
+        updated_at=updated_at.isoformat() if updated_at else None,
+        updated_by=updated_by,
     )
 
 

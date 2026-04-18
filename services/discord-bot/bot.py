@@ -365,6 +365,219 @@ async def _is_bot_thread(thread: "discord.Thread") -> bool:
     return msg.author == client.user
 
 
+# ---------------------------------------------------------------------------
+# /model slash commands (plan 17)
+# ---------------------------------------------------------------------------
+#
+# Read-only commands (`list`, `current`) are open to anyone in the guild.
+# `set` is gated on Discord's built-in Manage Server permission — no custom
+# roles or user allowlists for now.
+
+import time as _time
+
+_MODELS_BOT_CACHE_TTL = 30.0
+_models_bot_cache: dict[str, object] = {"ids": [], "fetched_at": -1e18}
+
+
+async def _fetch_models(url: str) -> list[str]:
+    """Return model IDs from the orchestrator's /models, 30s bot-side cache."""
+    now = _time.monotonic()
+    if (now - float(_models_bot_cache["fetched_at"])) < _MODELS_BOT_CACHE_TTL:
+        return list(_models_bot_cache["ids"])  # type: ignore[arg-type]
+    async with httpx.AsyncClient(timeout=10) as h:
+        r = await h.get(f"{url}/models")
+        r.raise_for_status()
+        ids = [m["id"] for m in r.json().get("data", [])]
+    _models_bot_cache["ids"] = ids
+    _models_bot_cache["fetched_at"] = now
+    return list(ids)
+
+
+async def _fetch_current(url: str, repo: str) -> dict:
+    async with httpx.AsyncClient(timeout=10) as h:
+        r = await h.get(f"{url}/settings", params={"repo": repo})
+        r.raise_for_status()
+        return r.json()
+
+
+async def _set_model(url: str, repo: str, name: str, user_id: str) -> tuple[int, dict]:
+    """Return (status_code, json_body). 400 is surfaced upward, not raised."""
+    async with httpx.AsyncClient(timeout=10) as h:
+        r = await h.post(
+            f"{url}/settings",
+            json={"repo": repo, "chat_model": name, "updated_by": user_id},
+        )
+    try:
+        body = r.json()
+    except Exception:
+        body = {"error": r.text[:500]}
+    return r.status_code, body
+
+
+model_group = app_commands.Group(
+    name="model",
+    description="Inspect or change the active chat model",
+)
+
+
+@model_group.command(name="list", description="List available chat models")
+async def _model_list(interaction: discord.Interaction):
+    if GUILD_ALLOWLIST and interaction.guild_id not in GUILD_ALLOWLIST:
+        await interaction.response.send_message(
+            "This bot isn't enabled in this server.", ephemeral=True,
+        )
+        return
+    log.info(
+        "bot model list",
+        extra={
+            "event": "bot.model_list",
+            "guild_id": interaction.guild_id,
+            "repo": REPO,
+        },
+    )
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        ids = await _fetch_models(RAG_URL)
+    except Exception:
+        log.exception("/model list: fetch failed")
+        await interaction.followup.send(
+            "Couldn't reach the model list right now. Try again shortly.",
+            ephemeral=True,
+        )
+        return
+    if not ids:
+        await interaction.followup.send(
+            "No models exposed by the LiteLLM backend.", ephemeral=True,
+        )
+        return
+    shown = ids[:25]
+    body = "```\n" + "\n".join(shown) + "\n```"
+    if len(ids) > 25:
+        body += f"_showing 25 of {len(ids)} — use `/model set` with any id above_"
+    await interaction.followup.send(body, ephemeral=True)
+
+
+@model_group.command(name="current", description="Show the active chat model for this instance")
+async def _model_current(interaction: discord.Interaction):
+    if GUILD_ALLOWLIST and interaction.guild_id not in GUILD_ALLOWLIST:
+        await interaction.response.send_message(
+            "This bot isn't enabled in this server.", ephemeral=True,
+        )
+        return
+    log.info(
+        "bot model current",
+        extra={
+            "event": "bot.model_current",
+            "guild_id": interaction.guild_id,
+            "repo": REPO,
+        },
+    )
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        data = await _fetch_current(RAG_URL, REPO)
+    except Exception:
+        log.exception("/model current: fetch failed")
+        await interaction.followup.send(
+            "Couldn't reach the orchestrator right now. Try again shortly.",
+            ephemeral=True,
+        )
+        return
+    chat_model = data.get("chat_model")
+    if not chat_model:
+        await interaction.followup.send(
+            "Using the chart default (no per-instance override set). "
+            "Run `/model set <name>` to pick one.",
+            ephemeral=True,
+        )
+        return
+    when = data.get("updated_at") or "unknown"
+    who_raw = data.get("updated_by")
+    # Discord snowflakes are 17–20-digit integers. Mention when it looks
+    # like one; show literal string otherwise.
+    if who_raw and who_raw.isdigit() and 17 <= len(who_raw) <= 20:
+        who = f"<@{who_raw}>"
+    else:
+        who = who_raw or "unknown"
+    await interaction.followup.send(
+        f"Active model: `{chat_model}`\nLast changed: {when} by {who}",
+        ephemeral=True,
+    )
+
+
+async def _model_name_autocomplete(
+    interaction: discord.Interaction, current: str,
+) -> list[app_commands.Choice[str]]:
+    try:
+        ids = await _fetch_models(RAG_URL)
+    except Exception:
+        return []
+    # Case-insensitive prefix/substring match. Discord caps at 25 choices.
+    q = current.lower()
+    matches = [i for i in ids if q in i.lower()][:25]
+    return [app_commands.Choice(name=i, value=i) for i in matches]
+
+
+@model_group.command(name="set", description="Set the active chat model (requires Manage Server)")
+@app_commands.describe(name="Model id — use /model list to see what's available")
+@app_commands.autocomplete(name=_model_name_autocomplete)
+async def _model_set(interaction: discord.Interaction, name: str):
+    if GUILD_ALLOWLIST and interaction.guild_id not in GUILD_ALLOWLIST:
+        await interaction.response.send_message(
+            "This bot isn't enabled in this server.", ephemeral=True,
+        )
+        return
+    perms = getattr(interaction.user, "guild_permissions", None)
+    if perms is None or not perms.manage_guild:
+        await interaction.response.send_message(
+            "This command requires the **Manage Server** permission.",
+            ephemeral=True,
+        )
+        return
+    log.info(
+        "bot model set",
+        extra={
+            "event": "bot.model_set",
+            "guild_id": interaction.guild_id,
+            "repo": REPO,
+            "user_id": str(interaction.user.id),
+            "model": name,
+        },
+    )
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        status, body = await _set_model(RAG_URL, REPO, name, str(interaction.user.id))
+    except Exception:
+        log.exception("/model set: request failed")
+        await interaction.followup.send(
+            "Couldn't reach the orchestrator right now. Try again shortly.",
+            ephemeral=True,
+        )
+        return
+    if status == 400:
+        err = body.get("error", "unknown error")
+        available = body.get("available") or []
+        sample = ", ".join(f"`{a}`" for a in available[:10])
+        more = f" (+{len(available) - 10} more)" if len(available) > 10 else ""
+        await interaction.followup.send(
+            f"{err}\nAvailable: {sample}{more}" if sample else err,
+            ephemeral=True,
+        )
+        return
+    if status >= 300:
+        await interaction.followup.send(
+            f"Orchestrator returned {status}: {body.get('error', 'unknown error')}",
+            ephemeral=True,
+        )
+        return
+    await interaction.followup.send(
+        f"Active chat model for this instance is now `{name}`.",
+        ephemeral=True,
+    )
+
+
+tree.add_command(model_group)
+
+
 @client.event
 async def on_ready():
     log.info(

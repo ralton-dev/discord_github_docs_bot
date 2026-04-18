@@ -105,10 +105,11 @@ discordBot:
   guildAllowlist: "CHANGE_ME_guild_id"   # comma-separate to allow multiple
 
 # ---------------------------------------------------------------------------
-# Models — only override the chat default if you want something other than
-# ollama_chat/llama3.2:3b for THIS instance. Once task 17 (runtime model
-# selection) ships, the bot's `/model set` command persists per-instance
-# choice in the DB and overrides this default at request time.
+# Models — the `chat` value below is the bootstrap DEFAULT. After first
+# deploy, prefer `/model set <name>` in Discord to change the active model
+# per-instance — that writes to the instance_settings table and takes effect
+# immediately (no redeploy). This value is only used when no override is
+# stored in the DB. See docs/models.md.
 #
 # Whatever you set here MUST exist as a model alias in the LiteLLM proxy
 # config. If LiteLLM returns 404 model_not_found, fix the alias there.

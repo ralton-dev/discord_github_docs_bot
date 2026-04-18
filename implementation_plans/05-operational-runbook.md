@@ -308,3 +308,41 @@ Release workflow notes:
   ingestion failure. PromQL templates for all four live in
   `docs/observability.md` — copy them into the operator's alerting stack
   verbatim, tune thresholds to the instance.
+
+---
+
+## Appendix: Drafted from task 17
+
+> Captured while wiring runtime chat-model selection through the Discord
+> bot, the rag orchestrator, and the `instance_settings` Postgres table.
+> When task 05 writes the full runbook, fold this into the "Daily ops"
+> and "Debugging" sections.
+
+- **Model switch procedure.** `/model set <name>` from Discord (requires
+  Manage Server permission). Takes effect on the next `/ask` — within
+  ~15s because of the per-repo orchestrator cache. No redeploy, no
+  values-file edit.
+- **Chart `models.chat` is only the bootstrap default.** Once
+  `instance_settings.chat_model` is populated (via `/model set`), the
+  DB wins. Bumping `models.chat` and `helm upgrade`-ing the chart has
+  **no effect** on instances that already set the override. To force a
+  chart-wide default change, also `UPDATE instance_settings SET
+  chat_model = NULL WHERE repo = '<slug>'` per instance.
+- **Embedding model is still static.** `models.embed` + `models.embedDim`
+  are fixed at install time. Runtime changes would invalidate every
+  vector in the `chunks` table. Never exposed via `/model`.
+- **Troubleshoot "unknown model".** If `/model set` 400s:
+  `kubectl -n gitdoc-<slug> exec deploy/gitdoc-<slug>-rag -- curl -s
+  http://localhost:8000/models | jq '.data[].id'` shows what LiteLLM is
+  actually exposing under the current aliases. Fix the LiteLLM config
+  if the intended alias is missing.
+- **Stale model after switch.** Two replicas of `rag` have independent
+  15s caches, so for ~15s after `/model set` different queries can
+  resolve to different models. Not worth a shared cache at homelab scale
+  but flag if users report inconsistency.
+- **Audit trail.** `instance_settings.updated_by` records the Discord
+  user snowflake. `SELECT repo, chat_model, updated_at, updated_by FROM
+  instance_settings` is the audit query; feed it into the runbook's
+  "who changed what" recipe.
+- **Decommissioning an instance.** `revoke-instance.sql` drops the DB
+  which includes `instance_settings`. No separate cleanup required.
