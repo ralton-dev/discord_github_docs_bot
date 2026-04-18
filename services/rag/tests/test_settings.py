@@ -21,6 +21,11 @@ from fastapi.testclient import TestClient
 
 import app as rag_app
 
+# This whole module exercises the real `_get_chat_model_for_repo` path,
+# so opt out of the autouse fixture in conftest.py that would otherwise
+# replace it with a stub.
+pytestmark = pytest.mark.no_autoset_model
+
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -261,16 +266,17 @@ class TestPostSettings:
 
 
 class TestResolveChatModelForRepo:
-    def test_falls_back_to_env_default_when_row_missing(self, monkeypatch, fake_clock):
+    def test_returns_none_when_row_missing(self, monkeypatch, fake_clock):
         fake = _FakeConn(rows=[None])
         monkeypatch.setattr(rag_app.psycopg, "connect", lambda *a, **kw: fake)
-        monkeypatch.setattr(rag_app, "CHAT_MODEL", "default-model")
-        assert rag_app._get_chat_model_for_repo("project_a") == "default-model"
+        # No env fallback: a missing row surfaces as None so callers can
+        # tell the user "run /model set" instead of silently routing to
+        # some default that may not exist on the backend.
+        assert rag_app._get_chat_model_for_repo("project_a") is None
 
     def test_returns_override_when_present(self, monkeypatch, fake_clock):
         fake = _FakeConn(rows=[("gpt-4o-mini",)])
         monkeypatch.setattr(rag_app.psycopg, "connect", lambda *a, **kw: fake)
-        monkeypatch.setattr(rag_app, "CHAT_MODEL", "default-model")
         assert rag_app._get_chat_model_for_repo("project_a") == "gpt-4o-mini"
 
     def test_cache_hit_within_ttl(self, monkeypatch, fake_clock):
@@ -300,10 +306,39 @@ class TestResolveChatModelForRepo:
         rag_app._get_chat_model_for_repo("project_a")
         assert calls["n"] == 2
 
-    def test_db_error_falls_back_to_default(self, monkeypatch):
+    def test_db_error_returns_none(self, monkeypatch):
         def _blow_up(*a, **kw):
             raise RuntimeError("db down")
 
         monkeypatch.setattr(rag_app.psycopg, "connect", _blow_up)
-        monkeypatch.setattr(rag_app, "CHAT_MODEL", "default-model")
-        assert rag_app._get_chat_model_for_repo("project_a") == "default-model"
+        # DB error also returns None — surfacing "not set" is better than
+        # silently routing to a stale env default that might not be what
+        # the operator meant.
+        assert rag_app._get_chat_model_for_repo("project_a") is None
+
+
+# ---------------------------------------------------------------------------
+# /ask short-circuits on unset model
+# ---------------------------------------------------------------------------
+
+
+class TestAskRequiresModel:
+    def test_ask_returns_409_when_model_not_set(
+        self, client, fake_clock, monkeypatch
+    ):
+        # No override in the DB and no env default fallback — /ask should
+        # return 409 with a structured body the bot can detect.
+        fake = _FakeConn(rows=[None])
+        monkeypatch.setattr(rag_app.psycopg, "connect", lambda *a, **kw: fake)
+        # Skip rate limit and query-cache fast paths by disabling them.
+        monkeypatch.setattr(rag_app, "RATE_LIMIT_ENABLED", False)
+        monkeypatch.setattr(rag_app, "QUERY_CACHE_ENABLED", False)
+
+        r = client.post(
+            "/ask",
+            json={"query": "anything", "repo": "project_a", "top_k": 3},
+        )
+        assert r.status_code == 409
+        body = r.json()
+        assert body["error"] == "model not set"
+        assert "/model set" in body["action"]

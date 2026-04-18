@@ -12,10 +12,10 @@ data:
   EMBED_MODEL: {{ .Values.models.embed | quote }}
   EMBED_DIM: {{ .Values.models.embedDim | quote }}
   EMBED_BATCH: {{ .Values.ingestion.embedBatch | quote }}
-  CHAT_MODEL: {{ .Values.models.chat | quote }}
   TARGET_REPO: {{ .Values.repo.name | quote }}
   RAG_ORCHESTRATOR_URL: "http://{{ include "gitdoc.fullname" . }}-rag:8000"
   GUILD_ALLOWLIST: {{ .Values.discordBot.guildAllowlist | quote }}
+  ASK_TIMEOUT_SECS: "{{ .Values.discordBot.askTimeoutSecs }}"
   HYBRID_SEARCH_ENABLED: "{{ .Values.search.hybrid.enabled }}"
   RERANKER_ENABLED: "{{ .Values.reranker.enabled }}"
   RERANKER_URL: {{ .Values.reranker.url | quote }}
@@ -113,3 +113,17 @@ data:
         ON rate_limit_usage (guild_id, window_at DESC);
     CREATE INDEX IF NOT EXISTS rate_limit_usage_user_window_idx
         ON rate_limit_usage (user_id, window_at DESC);
+
+    -- Per-instance mutable settings (plan 17). Currently only chat_model,
+    -- set via the Discord bot's /model set command and read by /ask on
+    -- every request (with a short-lived in-process cache). updated_by
+    -- records the Discord user ID for audit/rotation.
+    -- IMPORTANT: this block must stay in sync with db/init.sql. When
+    -- adding a new table, update both files or db-migrate will silently
+    -- leave the new table uncreated on existing installs.
+    CREATE TABLE IF NOT EXISTS instance_settings (
+        repo        TEXT PRIMARY KEY,
+        chat_model  TEXT,
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_by  TEXT
+    );

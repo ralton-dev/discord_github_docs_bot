@@ -149,24 +149,29 @@ secrets:
 # ---------------------------------------------------------------------------
 discordBot:
   guildAllowlist: "CHANGE_ME_guild_id"   # comma-separate to allow multiple
+  # Seconds to wait for the orchestrator's /ask response. Default 180.
+  # Bump higher if your LLM cold-starts slowly; drop to 60 for hosted
+  # models that are always warm.
+  # askTimeoutSecs: 180
 
 # ---------------------------------------------------------------------------
-# Models — the `chat` value below is the bootstrap DEFAULT. After first
-# deploy, prefer `/model set <name>` in Discord to change the active model
-# per-instance — that writes to the instance_settings table and takes effect
-# immediately (no redeploy). This value is only used when no override is
-# stored in the DB. See docs/models.md.
+# Models
 #
-# Whatever you set here MUST exist as a model alias in the LiteLLM proxy
-# config. If LiteLLM returns 404 model_not_found, fix the alias there.
+# The active CHAT model is NOT set here — it lives in `instance_settings.
+# chat_model`, set at runtime via the Discord bot's `/model set <name>`.
+# /ask responds "model not set" until the operator picks one. This forces
+# the choice to be validated against what LiteLLM actually exposes.
+#
+# Run `/model list` in Discord to see options, then `/model set <name>`
+# to pick one (requires Manage Server permission). See docs/models.md.
+#
+# EMBEDDING model/dim ARE chart-level (fixed at install, changing requires
+# re-ingest). Inherited from chart defaults (text-embedding-3-small @ 1536);
+# uncomment below only if you know you want a different embedding model.
 # ---------------------------------------------------------------------------
-models:
-  chat: "ollama_chat/llama3.2:3b"
-  # embed/embedDim are inherited from chart defaults (text-embedding-3-small
-  # at 1536). Changing these on an existing instance means re-embedding every
-  # chunk — only override on a fresh DB.
-  # embed: "text-embedding-3-small"
-  # embedDim: 1536
+# models:
+#   embed: "text-embedding-3-small"
+#   embedDim: 1536
 
 # ---------------------------------------------------------------------------
 # Ingestion cadence — every 6 hours by default. Tighter cadence costs more

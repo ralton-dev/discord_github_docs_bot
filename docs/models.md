@@ -1,14 +1,20 @@
 # Runtime model selection
 
-The chat model an instance uses is settable **at runtime** via Discord slash
-commands — no redeploy, no values-file edit. The chart's `models.chat`
-value is only the *bootstrap default*; once `/model set` has been used, the
-per-instance choice lives in Postgres (`instance_settings.chat_model`) and
-wins on every subsequent `/ask`.
+The chat model an instance uses is set **at runtime** via Discord slash
+commands — no redeploy, no values-file edit. The active choice lives in
+Postgres (`instance_settings.chat_model`) and is validated against what
+LiteLLM actually exposes at `/model set` time.
 
-Embedding models are **not** runtime-selectable — changing the embedding
-model invalidates every stored vector and requires a full re-ingest. That's
-still a chart value (`models.embed`), fixed at install time.
+**There is no chart default.** A fresh instance answers `/ask` with "model
+not set — run `/model set` first" until an admin picks one. This is
+deliberate: a chart-level default can't be validated against the
+destination LiteLLM, so a silent stale default would hide
+misconfiguration. Forcing `/model set` before the first `/ask` guarantees
+the active model is one LiteLLM has at runtime.
+
+Embedding models are NOT runtime-selectable — changing the embedding
+model invalidates every stored vector and requires a full re-ingest.
+That's still a chart value (`models.embed`), fixed at install time.
 
 ## Commands
 
@@ -28,8 +34,9 @@ Active model: `ollama_chat/llama3.2:3b`
 Last changed: 2026-04-18T13:14:07+00:00 by @user
 ```
 
-If nothing has been set, shows "Using the chart default (no per-instance
-override set)." Ephemeral.
+If nothing has been set yet, `/ask` will reply with the "model not set"
+nudge — run `/model list` to see options, then `/model set <name>` to
+pick one. Ephemeral.
 
 ### `/model set <name>`
 
@@ -63,6 +70,9 @@ just-in-flight query finishes on the old model.
 
 ## Troubleshooting
 
+- **"This bot doesn't have a chat model configured yet."** — brand-new
+  instance that hasn't had `/model set` run. A server admin
+  (`Manage Server` permission) runs `/model list` then `/model set <name>`.
 - **"unknown model: X"** — LiteLLM doesn't expose that alias. Check the
   LiteLLM proxy config; `/model list` shows what *is* exposed.
 - **`/model set` succeeds but `/ask` still uses the old model** — wait up

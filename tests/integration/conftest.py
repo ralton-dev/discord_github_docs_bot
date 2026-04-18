@@ -186,14 +186,32 @@ def pg_dsn(pg_container) -> str:
 
 @pytest.fixture
 def clean_db(pg_dsn: str) -> Iterator[str]:
-    """Truncate chunks + ingest_runs before each test that opts in.
+    """Truncate chunks + ingest_runs + rate limits + settings + cache
+    before each test that opts in. Also seeds `instance_settings` with
+    the fixture chat model so /ask won't 409 "model not set" before
+    the test even runs.
 
     Yields the DSN so tests can easily open their own connections.
     """
     with psycopg.connect(pg_dsn, autocommit=True) as conn:
         conn.execute(
-            "TRUNCATE chunks, ingest_runs, rate_limit_usage RESTART IDENTITY"
+            "TRUNCATE chunks, ingest_runs, rate_limit_usage, "
+            "query_cache, instance_settings RESTART IDENTITY"
         )
+        # Seed the chat model for every repo the tests use. Plan 17
+        # removed the env-var default, so /ask now requires an explicit
+        # row. The value "ollama_chat/llama3.2:3b" matches the mock
+        # LiteLLM's exposed list — see tests/integration/mock_litellm/.
+        # Seed for every repo slug the tests exercise, including the
+        # "nonexistent-repo-name" negative-case slug — /ask now needs
+        # an instance_settings row before it even runs retrieval.
+        for repo in ("sentinel", "nonexistent-repo-name"):
+            conn.execute(
+                "INSERT INTO instance_settings (repo, chat_model, updated_by) "
+                "VALUES (%s, %s, %s) "
+                "ON CONFLICT (repo) DO UPDATE SET chat_model = EXCLUDED.chat_model",
+                (repo, "ollama_chat/llama3.2:3b", "integration-test"),
+            )
     yield pg_dsn
 
 

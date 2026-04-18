@@ -160,3 +160,47 @@ class TestFormattedMessage:
         msg = bot._format_rate_limited_message(err)
         assert "5 seconds" in msg
         assert "user_budget" in msg
+
+
+# ---------------------------------------------------------------------------
+# /ask short-circuits on 409 (model not set)
+# ---------------------------------------------------------------------------
+
+
+class TestModelNotSetOn409:
+    def test_409_raises_model_not_set_error(self, monkeypatch):
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                409,
+                json={
+                    "error": "model not set",
+                    "action": "a server admin must run /model set",
+                },
+            )
+
+        seen = _install_mock_transport(monkeypatch, handler)
+        with pytest.raises(bot.ModelNotSetError):
+            _run(bot._ask_orchestrator("q?", guild_id="G", user_id="U"))
+        # Exactly one request — 409 must NOT trigger the 422+history retry.
+        assert len(seen) == 1
+
+    def test_409_not_retried_even_with_history(self, monkeypatch):
+        """422+history fallback is not triggered when the status is 409."""
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(409, json={"error": "model not set"})
+
+        seen = _install_mock_transport(monkeypatch, handler)
+        with pytest.raises(bot.ModelNotSetError):
+            _run(bot._ask_orchestrator(
+                "q?",
+                history=[{"role": "user", "content": "earlier"}],
+                guild_id="G",
+                user_id="U",
+            ))
+        assert len(seen) == 1
+
+    def test_model_not_set_message_is_actionable(self):
+        # Contract: the canned user-facing copy points at /model set.
+        assert "/model set" in bot._MODEL_NOT_SET_MESSAGE
+        assert "/model list" in bot._MODEL_NOT_SET_MESSAGE

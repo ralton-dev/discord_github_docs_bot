@@ -159,7 +159,7 @@ class TestAskInstrumentsMetrics:
         import app
 
         repo = "test-metrics-tokens"
-        model = app.CHAT_MODEL
+        model = "test-chat-model"
         before_prompt = REGISTRY.get_sample_value(
             "gitdoc_tokens_prompt_total", {"repo": repo, "model": model}
         ) or 0.0
@@ -196,7 +196,7 @@ class TestAskInstrumentsMetrics:
         import app
 
         repo = "test-metrics-no-usage"
-        model = app.CHAT_MODEL
+        model = "test-chat-model"
         before = REGISTRY.get_sample_value(
             "gitdoc_tokens_prompt_total", {"repo": repo, "model": model}
         ) or 0.0

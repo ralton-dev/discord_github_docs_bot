@@ -26,6 +26,14 @@ THREAD_AUTO_ARCHIVE_MINUTES = 60    # Discord accepts: 60 / 1440 / 4320 / 10080.
 HISTORY_TURN_LIMIT = 10             # Last N messages to consider as history.
 HISTORY_CHAR_BUDGET = 3000          # Drop oldest until total content <= budget.
 
+# Timeout for /ask calls against the orchestrator. Default 180s because a
+# locally-hosted LLM (Ollama) can take 30–90s to cold-load a model on the
+# first request, and the bot's 60s was not enough to survive that. Discord
+# gives us 15 minutes to respond via followup after defer(thinking=True),
+# so 180s is well within the window. Override via the chart's
+# `discordBot.askTimeoutSecs`.
+ASK_TIMEOUT_SECS = int(os.environ.get("ASK_TIMEOUT_SECS", "180"))
+
 # message_content is a privileged intent. It is required for the bot to read
 # the bodies of replies in its threads (those replies do not mention the bot,
 # so the message_content intent is mandatory; without it the .content field
@@ -176,6 +184,23 @@ def _format_rate_limited_message(err: RateLimitedError) -> str:
     )
 
 
+class ModelNotSetError(Exception):
+    """Raised by `_ask_orchestrator` when the orchestrator returns 409
+    because no chat model has been configured for this instance.
+
+    Distinct from a generic HTTP error: the remedy is explicit (run
+    `/model set`), so the command handlers render a specific nudge
+    message instead of "something went wrong".
+    """
+
+
+_MODEL_NOT_SET_MESSAGE = (
+    "This bot doesn't have a chat model configured yet.\n"
+    "A server admin can run `/model set <name>` to pick one. "
+    "Try `/model list` first to see what's available."
+)
+
+
 async def _ask_orchestrator(
     query: str,
     history: list[dict] | None = None,
@@ -211,7 +236,7 @@ async def _ask_orchestrator(
     if user_id is not None:
         body["user_id"] = user_id
 
-    async with httpx.AsyncClient(timeout=60) as h:
+    async with httpx.AsyncClient(timeout=ASK_TIMEOUT_SECS) as h:
         r = await h.post(f"{RAG_URL}/ask", json=body)
         # Rate limit first — we do NOT retry and we do NOT fall back to
         # "no history". 429 is a positive signal from the orchestrator
@@ -225,6 +250,11 @@ async def _ask_orchestrator(
             retry_after = int(err_body.get("retry_after") or 60)
             reason = str(err_body.get("error") or "rate_limited")
             raise RateLimitedError(retry_after=retry_after, reason=reason)
+        # 409 "model not set" — distinct from rate limit / generic error.
+        # The retry-without-history fallback below is NOT triggered here:
+        # re-sending won't make the model materialise.
+        if r.status_code == 409:
+            raise ModelNotSetError()
         if r.status_code == 422 and history:
             # Most likely cause: orchestrator hasn't shipped the history
             # field yet. Log once at INFO, then retry single-turn so the
@@ -306,6 +336,20 @@ async def ask(
         await interaction.followup.send(
             _format_rate_limited_message(rle), ephemeral=True,
         )
+        return
+    except ModelNotSetError:
+        log.info(
+            "rag model not set",
+            extra={
+                "event": "bot.response",
+                "query_id": query_id,
+                "guild_id": interaction.guild_id,
+                "repo": REPO,
+                "response_chars": 0,
+                "outcome": "model_not_set",
+            },
+        )
+        await interaction.followup.send(_MODEL_NOT_SET_MESSAGE, ephemeral=True)
         return
     except Exception:
         log.exception(
@@ -414,6 +458,20 @@ async def on_message(message: discord.Message) -> None:
             _format_rate_limited_message(rle),
             silent=True,
         )
+        return
+    except ModelNotSetError:
+        log.info(
+            "rag model not set for thread follow-up",
+            extra={
+                "event": "bot.response",
+                "query_id": query_id,
+                "guild_id": message.guild.id if message.guild else None,
+                "repo": REPO,
+                "response_chars": 0,
+                "outcome": "model_not_set",
+            },
+        )
+        await thread.send(_MODEL_NOT_SET_MESSAGE, silent=True)
         return
     except Exception:
         log.exception(
@@ -593,9 +651,12 @@ async def _model_current(interaction: discord.Interaction):
         return
     chat_model = data.get("chat_model")
     if not chat_model:
+        # No chart default exists (plan 17). /ask will refuse until a
+        # Manage-Server user runs /model set.
         await interaction.followup.send(
-            "Using the chart default (no per-instance override set). "
-            "Run `/model set <name>` to pick one.",
+            "No chat model is configured for this instance yet.\n"
+            "A server admin can run `/model set <name>` "
+            "(use `/model list` to see the options).",
             ephemeral=True,
         )
         return
@@ -663,6 +724,8 @@ async def _model_set(interaction: discord.Interaction, name: str):
         )
         return
     if status == 400:
+        # 4xx validation errors ARE actionable (bad model name, etc.) —
+        # surface verbatim so the user can self-correct.
         err = body.get("error", "unknown error")
         available = body.get("available") or []
         sample = ", ".join(f"`{a}`" for a in available[:10])
@@ -672,9 +735,24 @@ async def _model_set(interaction: discord.Interaction, name: str):
             ephemeral=True,
         )
         return
-    if status >= 300:
+    if status >= 500:
+        # 5xx is a backend fault. Log the raw body for us; give the user
+        # something friendly instead of a psycopg traceback in Discord.
+        log.error(
+            "rag POST /settings returned %s",
+            status,
+            extra={"event": "bot.model_set_backend_error", "status": status, "body": body},
+        )
         await interaction.followup.send(
-            f"Orchestrator returned {status}: {body.get('error', 'unknown error')}",
+            "Couldn't update the active model right now. Try again shortly.",
+            ephemeral=True,
+        )
+        return
+    if status >= 300:
+        # Other 4xx (401/403/404 etc.) — show the sanitised error field, not the raw body.
+        err = body.get("error", "request rejected")
+        await interaction.followup.send(
+            f"Couldn't update the model: {err}",
             ephemeral=True,
         )
         return
