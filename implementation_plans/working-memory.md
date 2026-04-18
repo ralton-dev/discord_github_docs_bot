@@ -24,13 +24,53 @@ Scaffold is complete (services, Dockerfiles, Helm chart, DB schema). Next up: Ph
 
 _Nothing claimed yet._
 
-## Next up (in order)
+## Recommended order
 
-1. **01 · Local dev compose** — tight feedback loop before touching k8s.
-2. **02 · Image build + push** — needed before helm install can pull anything.
-3. **03 · Provision Postgres instance** — DB + role for the first bot instance.
-4. **04 · Deploy first instance** — helm install + e2e smoke test.
-5. **05 · Operational runbook** — capture what we learn deploying #04.
+**Wave 1 — start in parallel from t=0 (no cross-deps):**
+- **01 · Local dev compose** — tight local feedback loop.
+- **02 · Image build + push** — registry images for helm to pull.
+- **03 · Provision Postgres instance** — DB + role for the first instance.
+- **06 · Unit tests** — pure-logic coverage; needs nothing.
+
+**Wave 2 — unblocked once Wave 1 is mostly done:**
+- **04 · Deploy first instance** — needs 02 + 03. Critical path.
+- **07 · Integration tests** — needs 01 + 06.
+- **08 · CI pipeline** — needs 02 + 06.
+
+**Wave 3 — draft during/after 04:**
+- **05 · Operational runbook** — best written as deploy pain is discovered, finalised once 04 works.
+
+**Wave 4 — post-04, fully parallel streams:**
+- **09 · Observability** — do this *first* in the RAG chain so later work has metrics to verify against.
+- **10 · Secrets hardening** — mostly Helm chart, independent of service code.
+- **15 · Webhook ingestion** — new endpoint, orthogonal to everything else.
+- **16 · Thread conversations** — bot-side only, no orchestrator changes.
+
+**Wave 5 — RAG retrieval-path chain (serialise; all touch `rag-orchestrator/app.py`):**
+1. **11 · Hybrid search** — broadens recall.
+2. **12 · Reranker** — filters candidates before the LLM.
+3. **13 · Query cache** — short-circuits on repeat questions.
+4. **14 · Rate limiting** — gates at the entry point.
+
+## Dependency graph
+
+```
+        ┌── 01 local-compose ──┐
+  t=0 ──┼── 02 images ─────────┼──> 04 deploy ──> 05 runbook
+        ├── 03 postgres ───────┘
+        └── 06 unit-tests ────────> 07 integration (needs 01)
+                                 └> 08 CI (needs 02)
+
+                                   ┌─ 09 observability
+                                   ├─ 10 secrets
+             after 04, fan out  ───┤  11 hybrid → 12 reranker → 13 cache → 14 rate-limit  (same file, serialise)
+                                   ├─ 15 webhook ingest
+                                   └─ 16 threads
+```
+
+**Hard blockers:** 04 ← (02, 03); 07 ← 01; 08 ← (02, 06); 09–16 all need 04 to validate.
+**Soft deps:** 02 benefits from 01 (smoke-test images locally); 05 drafted during 04; 13 wants 09 first for cache metrics.
+**Critical path to Phase 1 done:** `max(01, 02, 03)` → 04 → 05. Everything else parallelises around this spine.
 
 ## Blockers / open questions
 
