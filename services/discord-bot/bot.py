@@ -49,12 +49,110 @@ tree    = app_commands.CommandTree(client)
 _history_unsupported_logged = False
 
 
-def _format(answer: str, citations: list[dict]) -> str:
+# Discord hard-caps messages at 2000 chars. Leave ~100 char headroom for
+# inline markup Discord adds server-side and to avoid edge-case off-by-ones.
+DISCORD_MSG_LIMIT = 1900
+
+
+def _split_answer(answer: str, limit: int = DISCORD_MSG_LIMIT) -> list[str]:
+    """Split ``answer`` into chunks each ``<= limit`` characters.
+
+    Prefers paragraph (`\\n\\n`) breaks, falls back to sentence / single
+    newline breaks, then word boundaries, then a hard cut. Preserves
+    code-fence boundaries best-effort: if a cut would leave an open
+    ``` fence, we close it on the current chunk and re-open it on the
+    next so each message renders correctly on its own.
+
+    Returns a non-empty list — a short answer yields ``[answer]``.
+    """
+    if len(answer) <= limit:
+        return [answer]
+
+    chunks: list[str] = []
+    remaining = answer
+    while len(remaining) > limit:
+        # Preferred cut: paragraph break in the last ~half of the window.
+        cut = remaining.rfind("\n\n", 0, limit)
+        if cut < limit // 2:
+            # Sentence boundary: include the terminating punctuation in
+            # the current chunk, so `.rfind(". ", ...) + 1` cuts *after*
+            # the period, not before it.
+            sentence = max(
+                remaining.rfind(". ", 0, limit),
+                remaining.rfind("! ", 0, limit),
+                remaining.rfind("? ", 0, limit),
+            )
+            if sentence >= 0:
+                sentence += 1
+            newline = remaining.rfind("\n", 0, limit)
+            cut = max(sentence, newline, cut)
+        if cut < limit // 4:
+            cut = remaining.rfind(" ", 0, limit)
+        if cut <= 0:
+            # Nothing broke cleanly — hard-slice. Rare in practice; only
+            # triggered by a single token longer than `limit`.
+            cut = limit
+
+        piece = remaining[:cut].rstrip()
+        # Balance ``` fences across the split so each chunk is valid
+        # markdown on its own.
+        if piece.count("```") % 2 == 1:
+            piece += "\n```"
+            prefix = "```\n"
+        else:
+            prefix = ""
+        chunks.append(piece)
+        remaining = prefix + remaining[cut:].lstrip()
+
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
+def _sources_block(citations: list[dict]) -> str:
+    """Render the trailing `**Sources**` block shared by single- and
+    multi-message answers. Always starts with the separator blank line.
+    """
     cites = "\n".join(
         f"- `{c['path']}` @ `{c['commit_sha'][:7]}`" for c in citations
     ) or "_no sources_"
-    msg = f"{answer}\n\n**Sources**\n{cites}"
-    # Discord hard-caps messages at 2000 chars.
+    return f"\n\n**Sources**\n{cites}"
+
+
+def _format_messages(
+    answer: str,
+    citations: list[dict],
+    limit: int = DISCORD_MSG_LIMIT,
+) -> list[str]:
+    """Return the sequence of Discord messages for ``(answer, citations)``.
+
+    Short answers collapse to a single element; long answers split the
+    body across multiple messages and append the Sources block to the
+    LAST message (or, if the sources would overflow that last chunk, as
+    a dedicated final message). Every element is ``<= limit`` chars.
+    """
+    sources = _sources_block(citations)
+
+    # Happy path: everything fits in one message.
+    if len(answer) + len(sources) <= limit:
+        return [answer + sources]
+
+    # Split the answer, then glue the sources block to the last part
+    # (or push it onto its own message if there's no room).
+    parts = _split_answer(answer, limit)
+    if len(parts[-1]) + len(sources) <= limit:
+        parts[-1] = parts[-1] + sources
+    else:
+        parts.append(sources.lstrip())
+    return parts
+
+
+def _format(answer: str, citations: list[dict]) -> str:
+    """Legacy single-message formatter. Kept for callers that only need a
+    preview and don't care about >1900-char truncation (tests, log lines).
+    Prefer :func:`_format_messages` on the hot path.
+    """
+    msg = answer + _sources_block(citations)
     return msg if len(msg) <= 1990 else msg[:1987] + "..."
 
 
@@ -368,7 +466,8 @@ async def ask(
         )
         return
 
-    formatted = _format(data["answer"], data.get("citations", []))
+    messages = _format_messages(data["answer"], data.get("citations", []))
+    total_chars = sum(len(m) for m in messages)
     log.info(
         "bot response",
         extra={
@@ -376,19 +475,21 @@ async def ask(
             "query_id": query_id,
             "guild_id": interaction.guild_id,
             "repo": REPO,
-            "response_chars": len(formatted),
+            "response_chars": total_chars,
+            "response_messages": len(messages),
             "outcome": "ok" if data.get("citations") else "empty",
         },
     )
 
-    # Single-turn opt-out path: behaves exactly like the original bot.
+    # Single-turn opt-out path: send every chunk in order to the channel.
     if single:
-        await interaction.followup.send(formatted)
+        for part in messages:
+            await interaction.followup.send(part)
         return
 
-    # Default: post the answer, then spin up a thread off the response so
-    # the user can keep asking follow-ups in-place.
-    answer_msg = await interaction.followup.send(formatted, wait=True)
+    # Default: post the first chunk, open a thread off it, and post any
+    # remaining chunks inside the thread so follow-ups stay contextual.
+    answer_msg = await interaction.followup.send(messages[0], wait=True)
     try:
         thread_name = (query or "follow-up").strip()[:THREAD_NAME_LIMIT] or "follow-up"
         # `followup.send` returns a WebhookMessage which — on some
@@ -404,10 +505,14 @@ async def ask(
                 starter = answer_msg  # fall through; may still work
         else:
             starter = answer_msg
-        await starter.create_thread(
+        thread = await starter.create_thread(
             name=thread_name,
             auto_archive_duration=THREAD_AUTO_ARCHIVE_MINUTES,
         )
+        # Post any remaining chunks inside the thread so they stay with
+        # the original answer and don't spam the channel.
+        for part in messages[1:]:
+            await thread.send(part, silent=True)
     except (discord.HTTPException, ValueError):
         # Thread creation can fail (DMs, missing perms, non-guild
         # channel). The user still has the answer; log and move on.
@@ -504,7 +609,8 @@ async def on_message(message: discord.Message) -> None:
         )
         return
 
-    formatted = _format(data["answer"], data.get("citations", []))
+    messages = _format_messages(data["answer"], data.get("citations", []))
+    total_chars = sum(len(m) for m in messages)
     log.info(
         "bot response",
         extra={
@@ -512,14 +618,16 @@ async def on_message(message: discord.Message) -> None:
             "query_id": query_id,
             "guild_id": message.guild.id if message.guild else None,
             "repo": REPO,
-            "response_chars": len(formatted),
+            "response_chars": total_chars,
+            "response_messages": len(messages),
             "outcome": "ok" if data.get("citations") else "empty",
         },
     )
-    await thread.send(
-        formatted,
-        silent=True,  # MessageFlags(suppress_notifications=True)
-    )
+    for part in messages:
+        await thread.send(
+            part,
+            silent=True,  # MessageFlags(suppress_notifications=True)
+        )
 
 
 async def _is_bot_thread(thread: "discord.Thread") -> bool:
