@@ -109,6 +109,13 @@ dbMigrate:
   enabled: true
   image: "postgres:16-alpine"
 
+# Retrieval (plan 11). Hybrid search merges pgvector similarity with BM25
+# (`tsvector` + GIN) via Reciprocal Rank Fusion. Disable to fall back to
+# vector-only retrieval if a backend issue looks fusion-related.
+search:
+  hybrid:
+    enabled: true
+
 # Webhook-driven ingestion (plan 15). When enabled, the rag Deployment
 # exposes POST /webhook and spawns a Job from the ingestion CronJob on
 # every verified push. The CronJob stays as a safety net.

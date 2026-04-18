@@ -88,6 +88,15 @@ secrets:
   # webhookSecret: "CHANGE_ME_webhook_secret"
 
 # ---------------------------------------------------------------------------
+# Retrieval (optional, see docs/retrieval.md). Hybrid search (BM25 + vector
+# fused via RRF) is on by default; disable per-instance only if you need to
+# isolate a backend issue or A/B against vector-only.
+# ---------------------------------------------------------------------------
+# search:
+#   hybrid:
+#     enabled: false
+
+# ---------------------------------------------------------------------------
 # Webhook-driven ingestion (optional, see docs/webhooks.md). When enabled,
 # the rag pod exposes POST /webhook and spawns an ingestion Job on every
 # verified push. The CronJob remains as a safety net.

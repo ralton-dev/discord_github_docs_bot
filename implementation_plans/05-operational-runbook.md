@@ -346,3 +346,66 @@ Release workflow notes:
   "who changed what" recipe.
 - **Decommissioning an instance.** `revoke-instance.sql` drops the DB
   which includes `instance_settings`. No separate cleanup required.
+
+---
+
+## Appendix: Drafted from task 11
+
+> Captured while wiring hybrid search (BM25 + vector via Reciprocal Rank
+> Fusion) into `services/rag/app.py` and the chart. When task 05 writes
+> the full runbook, fold this into the "Daily ops / retrieval" and
+> "Debugging" sections. Full retrieval reference lives in
+> `docs/retrieval.md`; the runbook only needs the operator one-liners
+> below.
+
+- **The `chunks.content_tsv` column is generated.** Postgres keeps it
+  in sync on every INSERT/UPDATE — there is no trigger to manage and
+  ingestion code is unchanged. The migration is idempotent
+  (`ADD COLUMN IF NOT EXISTS`); `helm upgrade --install` picks it up
+  via the existing pre-install/upgrade migration Job.
+- **Backfill on existing instances is automatic.** When the migration
+  Job runs `ALTER TABLE ... ADD COLUMN ... GENERATED ... STORED`,
+  Postgres backfills every existing row in one pass. On a homelab-
+  scale corpus (≤ 1M chunks) this is seconds; on a much larger one,
+  schedule the upgrade off-peak — the table is exclusively locked for
+  the duration of the backfill.
+- **Disable hybrid per-instance** when isolating a fusion-related
+  regression:
+  ```yaml
+  # values-<slug>.yaml
+  search:
+    hybrid:
+      enabled: false
+  ```
+  then `helm upgrade --install`. The vector-only path
+  (`_retrieve_vector`) stays in the codebase and is exercised by the
+  same `/ask` request shape, so the rollback is a config change, not a
+  code change.
+- **Verifying the index exists.** Quick check after a deploy:
+  ```sh
+  kubectl -n gitdoc-<slug> exec deploy/gitdoc-<slug>-rag -- python -c \
+    "import os, psycopg; \
+     c = psycopg.connect(os.environ['POSTGRES_DSN']); \
+     print(c.execute(\"SELECT indexname FROM pg_indexes WHERE tablename='chunks'\").fetchall())"
+  ```
+  Expect `chunks_content_tsv_idx` in the list. If it's missing, the
+  pre-upgrade migration Job didn't run — check `kubectl get jobs
+  -n gitdoc-<slug>` for `gitdoc-<slug>-db-migrate` failures.
+- **"Why didn't BM25 find my exact-string query?"** Postgres's
+  `to_tsvector('english', ...)` applies English stemming and drops
+  stop-words. `process_batch` is split into `process` + `batch` (and
+  stemmed). Stop-words like `the`, `is`, `a` are dropped from the
+  query too. For corpora where this matters, switch the english
+  config to `simple` in `_retrieve_hybrid` — one-line change, requires
+  re-running the migration to drop and re-create `content_tsv` so the
+  generated expression matches.
+- **RRF tuning is rarely needed.** `RRF_K = 60` is the canonical value.
+  Lower `k` (20-30) makes top-of-list ranks dominate; higher `k`
+  (100+) flattens contribution. Don't tune without an evaluation set
+  — the constant is the kind of knob that's easy to fiddle and hard
+  to verify.
+- **Seam reserved for tasks 12-14.** `_retrieve` returns ordered rows
+  and is not allowed to mutate the chat call path — task 12
+  (reranker) wraps its output. The TOP of the `/ask` handler, before
+  the embedding call, is reserved as the insertion point for task 13
+  (query cache short-circuit) and task 14 (rate-limit gate).

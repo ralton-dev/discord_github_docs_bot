@@ -143,3 +143,38 @@ def test_query_with_no_matches_returns_empty_citations(
 
     assert body["citations"] == []
     assert "couldn't find anything" in body["answer"].lower()
+
+
+def test_hybrid_search_finds_unique_identifier_via_bm25(
+    clean_db: str, ingest_module, rag_app
+) -> None:
+    """Hybrid retrieval must surface a chunk via its literal identifier.
+
+    The fixture's `src/calculator.py` is the only file containing the
+    sentinel marker `quokka_addition_marker_42`. With hybrid search on
+    (the chart default), the BM25 leg of RRF should rank that chunk top
+    even when a query phrases the marker in a way that would not
+    otherwise embed strongly. This is the "exact-identifier lookup" case
+    that pure vector search struggles with on real models.
+    """
+    _seed(clean_db, ingest_module)
+
+    client = TestClient(rag_app.app)
+    resp = client.post("/ask", json={
+        "query": "quokka_addition_marker_42",
+        "repo": "sentinel",
+        "top_k": 3,
+    })
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    assert body["citations"], "expected at least one citation"
+    paths = [c["path"] for c in body["citations"]]
+    assert "src/calculator.py" in paths, (
+        f"calculator.py should be cited for the unique marker; got {paths}"
+    )
+    # Top-1 should be the unique source file — BM25 has a clean exact match
+    # and vector contributes (or is silent) on top of that.
+    assert paths[0] == "src/calculator.py", (
+        f"expected src/calculator.py ranked top-1; got {paths}"
+    )

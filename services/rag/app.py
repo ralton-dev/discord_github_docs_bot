@@ -26,6 +26,17 @@ PG_DSN       = os.environ["POSTGRES_DSN"]
 EMBED_MODEL  = os.environ.get("EMBED_MODEL", "text-embedding-3-small")
 CHAT_MODEL   = os.environ.get("CHAT_MODEL",  "claude-opus-4-7")
 
+# Hybrid retrieval (plan 11). When enabled, /ask blends pgvector similarity
+# with a BM25-style ranking over the `chunks.content_tsv` GIN index using
+# Reciprocal Rank Fusion. Set to "false" via the chart's
+# `search.hybrid.enabled` to fall back to vector-only.
+HYBRID_SEARCH_ENABLED = os.environ.get("HYBRID_SEARCH_ENABLED", "true").lower() == "true"
+# RRF constant. 60 is the canonical value from the original RRF paper
+# (Cormack et al., 2009) and is widely used as a safe default. Higher k
+# flattens the contribution of top-of-list ranks, lower k makes top ranks
+# dominate. Tune if recall on a specific corpus looks off.
+RRF_K = 60
+
 # Webhook settings. WEBHOOK_SECRET is optional at import time so the service
 # still runs on instances that leave webhooks disabled (webhook.enabled=false
 # in the chart); requests to /webhook will be rejected with 401 until it is
@@ -130,7 +141,13 @@ class AskResponse(BaseModel):
     citations: list[Citation]
 
 
-def _retrieve(repo: str, embedding: list[float], top_k: int):
+def _retrieve_vector(repo: str, embedding: list[float], top_k: int):
+    """Vector-only retrieval — pure pgvector cosine similarity.
+
+    Returned row shape: ``(path, commit_sha, content, content_type)``. Kept
+    as the fallback path when ``HYBRID_SEARCH_ENABLED`` is false or when a
+    future caller wants to bypass BM25 entirely.
+    """
     with psycopg.connect(PG_DSN, autocommit=True) as conn:
         register_vector(conn)
         return conn.execute(
@@ -145,6 +162,114 @@ def _retrieve(repo: str, embedding: list[float], top_k: int):
         ).fetchall()
 
 
+def _rrf_fuse(
+    rankings: list[list[Any]],
+    k: int = RRF_K,
+) -> list[tuple[Any, float]]:
+    """Pure Reciprocal Rank Fusion.
+
+    Each input list is an ordered ranking of arbitrary hashable IDs (best
+    first). For each ID, its RRF score is ``sum(1 / (k + rank))`` across
+    every list it appears in (rank is 1-based). Returns ``(id, score)``
+    tuples sorted by descending score; ties broken by first appearance
+    across the input rankings (Python's sort is stable).
+
+    Pure function — no DB, no I/O. Tested standalone in
+    ``tests/test_hybrid.py`` so the fusion math has its own coverage
+    independent of the SQL plumbing.
+    """
+    scores: dict[Any, float] = {}
+    first_seen: dict[Any, int] = {}
+    counter = 0
+    for ranking in rankings:
+        for rank, item in enumerate(ranking, start=1):
+            scores[item] = scores.get(item, 0.0) + 1.0 / (k + rank)
+            if item not in first_seen:
+                first_seen[item] = counter
+                counter += 1
+    # Sort by (-score, first_seen) so ties are deterministic and stable.
+    return sorted(scores.items(), key=lambda kv: (-kv[1], first_seen[kv[0]]))
+
+
+def _retrieve_hybrid(
+    repo: str,
+    query_text: str,
+    embedding: list[float],
+    top_k: int,
+):
+    """Hybrid retrieval — vector ANN + BM25, fused via RRF.
+
+    Pulls ``top_k * 3`` candidates from each side (a wider pool than the
+    final cut so the fusion has signal beyond the obvious top hits), fuses
+    their rankings with :func:`_rrf_fuse` (k=60), then materialises the
+    top ``top_k`` rows in fused order.
+
+    Returned row shape matches :func:`_retrieve_vector`:
+    ``(path, commit_sha, content, content_type)``. Callers don't need to
+    know which path produced the rows.
+    """
+    fetch_n = top_k * 3
+    with psycopg.connect(PG_DSN, autocommit=True) as conn:
+        register_vector(conn)
+        # Vector candidates — same query as the vector-only path, just
+        # widened to top_k * 3.
+        vector_rows = conn.execute(
+            """
+            SELECT id, path, commit_sha, content, content_type
+            FROM chunks
+            WHERE repo = %s
+            ORDER BY embedding <=> %s::vector
+            LIMIT %s
+            """,
+            (repo, embedding, fetch_n),
+        ).fetchall()
+        # BM25 candidates — only consider rows whose tsvector matches the
+        # parsed query at all (the @@ filter), then rank by ts_rank_cd.
+        # plainto_tsquery handles tokenisation + stemming; identifiers like
+        # `process_batch` are split by `_` under the english config which
+        # is fine for our use case (the integration test uses an
+        # underscore-free literal as the BM25 marker).
+        bm25_rows = conn.execute(
+            """
+            SELECT id, path, commit_sha, content, content_type
+            FROM chunks
+            WHERE repo = %s
+              AND content_tsv @@ plainto_tsquery('english', %s)
+            ORDER BY ts_rank_cd(content_tsv, plainto_tsquery('english', %s)) DESC
+            LIMIT %s
+            """,
+            (repo, query_text, query_text, fetch_n),
+        ).fetchall()
+
+    # Build an id -> row lookup for materialisation after fusion.
+    rows_by_id: dict[int, tuple] = {}
+    for row in vector_rows:
+        rows_by_id[row[0]] = row[1:]
+    for row in bm25_rows:
+        rows_by_id.setdefault(row[0], row[1:])
+
+    fused = _rrf_fuse(
+        [
+            [r[0] for r in vector_rows],
+            [r[0] for r in bm25_rows],
+        ],
+    )
+    return [rows_by_id[chunk_id] for chunk_id, _score in fused[:top_k]]
+
+
+def _retrieve(repo: str, query_text: str, embedding: list[float], top_k: int):
+    """Dispatcher — hybrid when enabled, vector-only otherwise.
+
+    The signature is hybrid-shaped (carries ``query_text``) so the call
+    site stays uniform across modes; the vector-only path simply ignores
+    the text. Keeping this as the single entry point means task 12
+    (reranker) can wrap it without forking on the flag.
+    """
+    if HYBRID_SEARCH_ENABLED:
+        return _retrieve_hybrid(repo, query_text, embedding, top_k)
+    return _retrieve_vector(repo, embedding, top_k)
+
+
 @app.post("/ask", response_model=AskResponse)
 def ask(req: AskRequest):
     start = time.perf_counter()
@@ -152,6 +277,12 @@ def ask(req: AskRequest):
     hits = 0
     prompt_tokens = 0
     completion_tokens = 0
+    # ------------------------------------------------------------------
+    # Pre-retrieval gates — keep this region short. Task 13 (query cache)
+    # and task 14 (rate limiting) will both insert here, BEFORE the
+    # embedding call: cache short-circuits with a stored response,
+    # rate-limit returns 429. Anything below this point is the slow path.
+    # ------------------------------------------------------------------
     # Resolve the active model per-request (plan 17). Cache means this is
     # cheap on the hot path; falls back to CHAT_MODEL when no override is set.
     model = _get_chat_model_for_repo(req.repo)
@@ -176,7 +307,7 @@ def ask(req: AskRequest):
                 status_code=502, detail="embedding backend unavailable"
             ) from exc
 
-        rows = _retrieve(req.repo, emb, req.top_k)
+        rows = _retrieve(req.repo, req.query, emb, req.top_k)
         hits = len(rows)
         metrics.RETRIEVAL_HITS.labels(req.repo).observe(hits)
 

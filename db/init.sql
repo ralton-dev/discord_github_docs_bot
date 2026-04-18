@@ -22,6 +22,16 @@ CREATE INDEX IF NOT EXISTS chunks_repo_idx ON chunks (repo);
 CREATE INDEX IF NOT EXISTS chunks_embedding_idx
     ON chunks USING hnsw (embedding vector_cosine_ops);
 
+-- Hybrid search (plan 11). The generated tsvector column stays in sync with
+-- `content` automatically on every INSERT/UPDATE — no trigger or
+-- application-side bookkeeping. The GIN index supports BM25-style ranking
+-- via `ts_rank_cd(content_tsv, plainto_tsquery('english', $query))`.
+ALTER TABLE chunks
+    ADD COLUMN IF NOT EXISTS content_tsv tsvector
+    GENERATED ALWAYS AS (to_tsvector('english', content)) STORED;
+CREATE INDEX IF NOT EXISTS chunks_content_tsv_idx
+    ON chunks USING gin (content_tsv);
+
 CREATE TABLE IF NOT EXISTS ingest_runs (
     id            BIGSERIAL PRIMARY KEY,
     repo          TEXT NOT NULL,

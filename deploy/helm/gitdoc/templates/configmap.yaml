@@ -16,6 +16,7 @@ data:
   TARGET_REPO: {{ .Values.repo.name | quote }}
   RAG_ORCHESTRATOR_URL: "http://{{ include "gitdoc.fullname" . }}-rag:8000"
   GUILD_ALLOWLIST: {{ .Values.discordBot.guildAllowlist | quote }}
+  HYBRID_SEARCH_ENABLED: "{{ .Values.search.hybrid.enabled }}"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -45,6 +46,14 @@ data:
     CREATE INDEX IF NOT EXISTS chunks_repo_idx ON chunks (repo);
     CREATE INDEX IF NOT EXISTS chunks_embedding_idx
         ON chunks USING hnsw (embedding vector_cosine_ops);
+
+    -- Hybrid search (plan 11). Generated tsvector + GIN keep BM25 ranking
+    -- automatic on every INSERT/UPDATE; no application-side trigger needed.
+    ALTER TABLE chunks
+        ADD COLUMN IF NOT EXISTS content_tsv tsvector
+        GENERATED ALWAYS AS (to_tsvector('english', content)) STORED;
+    CREATE INDEX IF NOT EXISTS chunks_content_tsv_idx
+        ON chunks USING gin (content_tsv);
 
     CREATE TABLE IF NOT EXISTS ingest_runs (
         id            BIGSERIAL PRIMARY KEY,
