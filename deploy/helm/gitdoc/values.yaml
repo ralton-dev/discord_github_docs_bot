@@ -1,25 +1,20 @@
 nameOverride: ""
 
-# NOTE: images.*.repository below is a PLACEHOLDER. The registry has not
-# been chosen yet — see implementation_plans/working-memory.md (the
-# "Registry" open question) and deploy/REGISTRY.md for the three options
-# under consideration (GHCR / Harbor / local registry:2) and the
-# `regcred` Secret pattern for private registries.
-# The image tag should match `make print-tag` output at deploy time.
+# Images live in GHCR under the ralton-dev org. Public images are free to
+# pull; no `regcred` Secret needed unless a package is set to private (see
+# deploy/REGISTRY.md). The image tag should match `make print-tag` output
+# at deploy time.
 images:
-  # registry decision pending — see deploy/REGISTRY.md
   bot:
-    repository: ghcr.io/you/gitdoc-discord-bot
+    repository: ghcr.io/ralton-dev/gitdoc-discord-bot
     tag: "0.1.0"
     pullPolicy: IfNotPresent
-  # registry decision pending — see deploy/REGISTRY.md
   rag:
-    repository: ghcr.io/you/gitdoc-rag
+    repository: ghcr.io/ralton-dev/gitdoc-rag
     tag: "0.1.0"
     pullPolicy: IfNotPresent
-  # registry decision pending — see deploy/REGISTRY.md
   ingestion:
-    repository: ghcr.io/you/gitdoc-ingestion
+    repository: ghcr.io/ralton-dev/gitdoc-ingestion
     tag: "0.1.0"
     pullPolicy: IfNotPresent
 
@@ -34,7 +29,9 @@ litellm:
 models:
   embed: "text-embedding-3-small"
   embedDim: 1536
-  chat: "claude-opus-4-7"
+  # Default chat model — runtime-overridable via the bot's /model command
+  # once task 17 lands (per-instance setting persisted in the DB).
+  chat: "ollama_chat/llama3.2:3b"
 
 # NOTE: for real deployments prefer sealed-secrets / external-secrets
 # over plain-text values here. Fields left empty will be rendered as "".
