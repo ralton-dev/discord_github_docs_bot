@@ -391,13 +391,26 @@ async def ask(
     answer_msg = await interaction.followup.send(formatted, wait=True)
     try:
         thread_name = (query or "follow-up").strip()[:THREAD_NAME_LIMIT] or "follow-up"
-        await answer_msg.create_thread(
+        # `followup.send` returns a WebhookMessage which — on some
+        # discord.py versions — does not carry guild context, so calling
+        # `.create_thread()` on it raises "message does not have guild
+        # info attached". Re-fetching the message through the channel
+        # returns a full Message with the guild attached.
+        starter: discord.Message
+        if interaction.channel is not None and hasattr(interaction.channel, "fetch_message"):
+            try:
+                starter = await interaction.channel.fetch_message(answer_msg.id)
+            except discord.HTTPException:
+                starter = answer_msg  # fall through; may still work
+        else:
+            starter = answer_msg
+        await starter.create_thread(
             name=thread_name,
             auto_archive_duration=THREAD_AUTO_ARCHIVE_MINUTES,
         )
-    except discord.HTTPException:
-        # Thread creation can fail (DMs, missing perms). The user still has
-        # the answer; just log and move on.
+    except (discord.HTTPException, ValueError):
+        # Thread creation can fail (DMs, missing perms, non-guild
+        # channel). The user still has the answer; log and move on.
         log.exception("failed to create thread for /ask follow-ups")
 
 
