@@ -3,8 +3,9 @@
 Living doc. Update on every working session. Kept short on purpose — if a section grows past a page, promote it to a task file or an ADR.
 
 **Last updated:** 2026-04-18
-**Current phase:** 1 (MVP — ship to homelab)
-**Wave 1 status:** ✅ tasks 01, 02, 03, 06 done. Wave 2 blocked on the registry decision (task 02 surfaced) before task 04 can run.
+**Current phase:** 1 closing → entering Phase 2/3/4 work in waves 3 onward.
+**Waves done:** 1 (01, 02, 03, 06), 2 (04, 07, 08).
+**Operator-blocking before first live deploy:** push a `v0.1.0` tag (CI publishes images to GHCR), provision Postgres via `db/provision/`, fill `values-<slug>.yaml`, `make helm-install`, run `scripts/smoke-test.sh`. The agent has shipped everything needed up to that handover.
 
 ---
 
@@ -19,7 +20,10 @@ Living doc. Update on every working session. Kept short on purpose — if a sect
 
 ## Current focus
 
-Wave 1 shipped (compose, build/registry doc, Postgres provisioning scripts, unit-test harness). Next up: Wave 2 — task 04 (deploy first instance), 07 (integration tests), 08 (CI). Task 04 is blocked on the registry decision; 07 and 08 can proceed once 04 starts.
+Wave 2 shipped (chart hardened + deploy procedure, integration suite, CI/release workflows). Next up:
+- **Wave 3:** plan 05 (operational runbook). Best written **after** the operator does the first real deploy and validates the procedures. Until then, the two appendices in plan 05 capture what the runbook must cover.
+- **Wave 4:** plans 09 (observability), 10 (secrets hardening), 15 (webhook ingestion), 16 (thread conversations), 17 (runtime model selection). Fully parallel.
+- **Wave 5:** plans 11 → 12 → 13 → 14 (RAG retrieval-path chain — serialised on `services/rag/app.py`).
 
 ## In progress
 
@@ -75,15 +79,20 @@ _Nothing claimed yet._
 
 ## Blockers / open questions
 
-- **Registry:** GHCR? Homelab Harbor? Local `registry:2`? Decides `images.*.repository` in values files.
-- **Embedding model:** currently defaulted to `text-embedding-3-small` (1536 dim). Ollama `nomic-embed-text` (768) is cheaper and private — worth benchmarking recall before committing. Changing this later means re-embedding everything.
+- **First live deploy:** unknown until the operator runs through `deploy/DEPLOY.md` against the homelab. The procedure is captured but unverified end-to-end.
+- **GHCR package visibility:** must be set to **Public** after the first successful publish (Settings → Packages → each `gitdoc-*`). Otherwise the chart's `pullPolicy: IfNotPresent` will silently fail without a `regcred` secret.
+- **LiteLLM model aliases:** confirm `text-embedding-3-small` and `ollama_chat/llama3.2:3b` are exposed under those names in the homelab LiteLLM. The chart values let you override per-instance if not.
+- **First target repo:** the per-instance values file decides — flagged for the operator at deploy time, not a code blocker.
 - **Postgres tenancy:** shared DB with `repo` column (current design) vs one DB per instance. Current scale suggests shared; revisit if a repo needs compliance isolation.
-- **LiteLLM model aliases:** does the existing LiteLLM config expose `claude-opus-4-7` and `text-embedding-3-small` under those names, or do we need aliases? Check before first deploy.
-- **First target repo:** which project are we pointing at first? That repo's size and language mix shape chunking defaults.
 
 ## Recent decisions
 
-- **2026-04-18** Wave 1 complete (01 compose, 02 build/registry-docs, 03 Postgres provisioning scripts, 06 unit tests). 29/29 unit tests pass; `docker compose config` validates; `helm lint` clean.
+- **2026-04-18** Service `rag-orchestrator` renamed to `rag` everywhere. Image is now `ghcr.io/ralton-dev/gitdoc-rag` (resolves the latent Makefile/chart name mismatch).
+- **2026-04-18** Registry = GHCR (`ghcr.io/ralton-dev`), public packages, no `regcred`. CI publishes via tag push using `GITHUB_TOKEN`.
+- **2026-04-18** Default chat model = `ollama_chat/llama3.2:3b`, runtime-overridable once plan 17 ships. Embedding stays `text-embedding-3-small` (changing it later invalidates every stored vector).
+- **2026-04-18** Plan 17 added (Wave 4): per-instance chat model in DB, `/model list/current/set` slash commands, gated by Discord's built-in `Manage Server` permission. No custom roles or user allowlists for now.
+- **2026-04-18** Wave 2 complete (04 deploy package + chart hardening, 07 integration tests with testcontainers, 08 CI/release workflows). 29 unit + 4 integration tests pass; `helm lint`/`template`/`compose config` clean. **Cluster-side steps (push tag, provision Postgres, helm install, smoke test) remain on the operator.**
+- **2026-04-18** Wave 1 complete (01 compose, 02 build/registry-docs, 03 Postgres provisioning scripts, 06 unit tests).
 - **2026-04-18** Image tag scheme = `<VERSION>-<short-sha>` (e.g. `0.1.0-9b83072`). Bump `VERSION` in Makefile for semver level changes.
 - **2026-04-18** pgvector HNSW index (not IVFFlat) — no training step, good recall at homelab scale.
 - **2026-04-18** OpenAI-compatible client against LiteLLM, not per-provider SDKs — single code path, LiteLLM handles routing.
