@@ -1,0 +1,41 @@
+{{- if .Values.dbMigrate.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "gitdoc.fullname" . }}-db-migrate
+  labels:
+    {{- include "gitdoc.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        {{- include "gitdoc.labels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: {{ .Values.dbMigrate.image | quote }}
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              psql "$POSTGRES_DSN" -v ON_ERROR_STOP=1 -f /migrations/init.sql
+          env:
+            - name: POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gitdoc.fullname" . }}-secrets
+                  key: POSTGRES_DSN
+          volumeMounts:
+            - name: migrations
+              mountPath: /migrations
+      volumes:
+        - name: migrations
+          configMap:
+            name: {{ include "gitdoc.fullname" . }}-migrations
+{{- end }}

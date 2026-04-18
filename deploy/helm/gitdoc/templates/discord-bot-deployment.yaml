@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "gitdoc.fullname" . }}-bot
+  labels:
+    {{- include "gitdoc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: discord-bot
+spec:
+  replicas: {{ .Values.discordBot.replicas }}
+  strategy:
+    type: Recreate     # only one gateway session per token
+  selector:
+    matchLabels:
+      {{- include "gitdoc.selector.bot" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "gitdoc.selector.bot" . | nindent 8 }}
+    spec:
+      containers:
+        - name: bot
+          image: "{{ .Values.images.bot.repository }}:{{ .Values.images.bot.tag }}"
+          imagePullPolicy: {{ .Values.images.bot.pullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "gitdoc.fullname" . }}-config
+            - secretRef:
+                name: {{ include "gitdoc.fullname" . }}-secrets
+          resources:
+            {{- toYaml .Values.discordBot.resources | nindent 12 }}
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

@@ -1,0 +1,33 @@
+-- Canonical schema. The Helm chart ships the same SQL templated with the
+-- configured embedding dimension; this copy is for local dev / reference.
+
+CREATE EXTENSION IF NOT EXISTS vector;
+
+CREATE TABLE IF NOT EXISTS chunks (
+    id            BIGSERIAL PRIMARY KEY,
+    repo          TEXT NOT NULL,
+    path          TEXT NOT NULL,
+    commit_sha    TEXT NOT NULL,
+    chunk_index   INT  NOT NULL,
+    content       TEXT NOT NULL,
+    content_type  TEXT NOT NULL,
+    language      TEXT,
+    token_count   INT,
+    embedding     vector(1536) NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (repo, path, commit_sha, chunk_index)
+);
+
+CREATE INDEX IF NOT EXISTS chunks_repo_idx ON chunks (repo);
+CREATE INDEX IF NOT EXISTS chunks_embedding_idx
+    ON chunks USING hnsw (embedding vector_cosine_ops);
+
+CREATE TABLE IF NOT EXISTS ingest_runs (
+    id            BIGSERIAL PRIMARY KEY,
+    repo          TEXT NOT NULL,
+    commit_sha    TEXT NOT NULL,
+    started_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at   TIMESTAMPTZ,
+    chunk_count   INT,
+    status        TEXT NOT NULL DEFAULT 'running'
+);

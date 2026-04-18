@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "gitdoc.fullname" . }}-rag
+  labels:
+    {{- include "gitdoc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rag-orchestrator
+spec:
+  replicas: {{ .Values.ragOrchestrator.replicas }}
+  selector:
+    matchLabels:
+      {{- include "gitdoc.selector.rag" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "gitdoc.selector.rag" . | nindent 8 }}
+    spec:
+      containers:
+        - name: app
+          image: "{{ .Values.images.rag.repository }}:{{ .Values.images.rag.tag }}"
+          imagePullPolicy: {{ .Values.images.rag.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: {{ include "gitdoc.fullname" . }}-config
+            - secretRef:
+                name: {{ include "gitdoc.fullname" . }}-secrets
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 20
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.ragOrchestrator.resources | nindent 12 }}
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "gitdoc.fullname" . }}-rag
+  labels:
+    {{- include "gitdoc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rag-orchestrator
+spec:
+  selector:
+    {{- include "gitdoc.selector.rag" . | nindent 4 }}
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

@@ -1,0 +1,76 @@
+nameOverride: ""
+
+images:
+  bot:
+    repository: ghcr.io/you/gitdoc-discord-bot
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  rag:
+    repository: ghcr.io/you/gitdoc-rag
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  ingestion:
+    repository: ghcr.io/you/gitdoc-ingestion
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+
+repo:
+  name: "example"
+  url: "https://github.com/example/example.git"
+  branch: "main"
+
+litellm:
+  baseUrl: "http://litellm.litellm.svc.cluster.local:4000"
+
+models:
+  embed: "text-embedding-3-small"
+  embedDim: 1536
+  chat: "claude-opus-4-7"
+
+# NOTE: for real deployments prefer sealed-secrets / external-secrets
+# over plain-text values here. Fields left empty will be rendered as "".
+secrets:
+  discordBotToken: ""
+  litellmApiKey: ""
+  postgresDsn: ""
+  gitToken: ""
+
+# Discord allows one gateway websocket per bot token. Keep replicas=1.
+# To scale, use Discord sharding, not extra pods.
+discordBot:
+  replicas: 1
+  guildAllowlist: ""   # comma-separated guild IDs; empty = allow all
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"
+
+ragOrchestrator:
+  replicas: 2
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "1"
+      memory: "1Gi"
+
+ingestion:
+  schedule: "0 */6 * * *"
+  embedBatch: 64
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "512Mi"
+    limits:
+      cpu: "2"
+      memory: "2Gi"
+  scratchSize: "2Gi"
+
+# Runs the init.sql migrations as a Helm pre-install/upgrade hook.
+dbMigrate:
+  enabled: true
+  image: "postgres:16-alpine"

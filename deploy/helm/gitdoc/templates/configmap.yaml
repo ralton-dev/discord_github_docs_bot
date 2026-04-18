@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "gitdoc.fullname" . }}-config
+  labels:
+    {{- include "gitdoc.labels" . | nindent 4 }}
+data:
+  REPO_URL: {{ .Values.repo.url | quote }}
+  REPO_NAME: {{ .Values.repo.name | quote }}
+  REPO_BRANCH: {{ .Values.repo.branch | quote }}
+  LITELLM_BASE_URL: {{ .Values.litellm.baseUrl | quote }}
+  EMBED_MODEL: {{ .Values.models.embed | quote }}
+  EMBED_DIM: {{ .Values.models.embedDim | quote }}
+  EMBED_BATCH: {{ .Values.ingestion.embedBatch | quote }}
+  CHAT_MODEL: {{ .Values.models.chat | quote }}
+  TARGET_REPO: {{ .Values.repo.name | quote }}
+  RAG_ORCHESTRATOR_URL: "http://{{ include "gitdoc.fullname" . }}-rag:8000"
+  GUILD_ALLOWLIST: {{ .Values.discordBot.guildAllowlist | quote }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "gitdoc.fullname" . }}-migrations
+  labels:
+    {{- include "gitdoc.labels" . | nindent 4 }}
+data:
+  init.sql: |
+    CREATE EXTENSION IF NOT EXISTS vector;
+
+    CREATE TABLE IF NOT EXISTS chunks (
+        id            BIGSERIAL PRIMARY KEY,
+        repo          TEXT NOT NULL,
+        path          TEXT NOT NULL,
+        commit_sha    TEXT NOT NULL,
+        chunk_index   INT  NOT NULL,
+        content       TEXT NOT NULL,
+        content_type  TEXT NOT NULL,
+        language      TEXT,
+        token_count   INT,
+        embedding     vector({{ .Values.models.embedDim }}) NOT NULL,
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (repo, path, commit_sha, chunk_index)
+    );
+
+    CREATE INDEX IF NOT EXISTS chunks_repo_idx ON chunks (repo);
+    CREATE INDEX IF NOT EXISTS chunks_embedding_idx
+        ON chunks USING hnsw (embedding vector_cosine_ops);
+
+    CREATE TABLE IF NOT EXISTS ingest_runs (
+        id            BIGSERIAL PRIMARY KEY,
+        repo          TEXT NOT NULL,
+        commit_sha    TEXT NOT NULL,
+        started_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+        finished_at   TIMESTAMPTZ,
+        chunk_count   INT,
+        status        TEXT NOT NULL DEFAULT 'running'
+    );

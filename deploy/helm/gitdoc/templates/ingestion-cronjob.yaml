@@ -1,0 +1,46 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "gitdoc.fullname" . }}-ingest
+  labels:
+    {{- include "gitdoc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ingestion
+spec:
+  schedule: {{ .Values.ingestion.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            {{- include "gitdoc.labels" . | nindent 12 }}
+            app.kubernetes.io/component: ingestion
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: ingest
+              image: "{{ .Values.images.ingestion.repository }}:{{ .Values.images.ingestion.tag }}"
+              imagePullPolicy: {{ .Values.images.ingestion.pullPolicy }}
+              envFrom:
+                - configMapRef:
+                    name: {{ include "gitdoc.fullname" . }}-config
+                - secretRef:
+                    name: {{ include "gitdoc.fullname" . }}-secrets
+              volumeMounts:
+                - name: scratch
+                  mountPath: /tmp
+              resources:
+                {{- toYaml .Values.ingestion.resources | nindent 16 }}
+              securityContext:
+                runAsNonRoot: true
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+          volumes:
+            - name: scratch
+              emptyDir:
+                sizeLimit: {{ .Values.ingestion.scratchSize | quote }}
