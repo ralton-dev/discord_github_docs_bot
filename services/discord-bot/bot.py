@@ -49,6 +49,80 @@ tree    = app_commands.CommandTree(client)
 _history_unsupported_logged = False
 
 
+async def _open_followup_thread(
+    interaction: "discord.Interaction",
+    answer_msg: "discord.Message",
+    name: str,
+) -> "discord.Thread | None":
+    """Open a public thread anchored on the /ask answer.
+
+    Discord's `Message.create_thread` requires the message to have
+    `.guild` populated. `interaction.followup.send(...)` returns a
+    WebhookMessage without guild context, and on current discord.py
+    `interaction.channel` is a PartialMessageable — so naïvely fetching
+    the message gives a Message whose `.guild` is also None.
+
+    Escalating strategy:
+
+    1. Resolve the real TextChannel via ``interaction.guild.get_channel``
+       (cheap, cached) and fetch the posted message through it. That
+       Message has `.guild` attached, so Message.create_thread works.
+    2. If that fails, create a starter-less public thread directly on
+       the TextChannel via ``TextChannel.create_thread(name=...)``. The
+       thread still appears in the channel and follow-ups work the same
+       way; it just won't be visually anchored to the answer message.
+    3. If even that fails (DMs, missing perms), return ``None`` so the
+       caller can fall back to sending remaining chunks inline.
+    """
+    guild = interaction.guild
+    if guild is None or interaction.channel_id is None:
+        return None
+
+    channel = guild.get_channel(interaction.channel_id)
+    if channel is None:
+        try:
+            channel = await guild.fetch_channel(interaction.channel_id)
+        except discord.HTTPException:
+            channel = None
+
+    # Strategy 1: fetch the answer as a guild-attached Message and
+    # create the thread off it (the UX that visually anchors the
+    # thread under the answer).
+    if channel is not None and hasattr(channel, "fetch_message"):
+        try:
+            guild_msg = await channel.fetch_message(answer_msg.id)
+            if guild_msg.guild is not None:
+                return await guild_msg.create_thread(
+                    name=name,
+                    auto_archive_duration=THREAD_AUTO_ARCHIVE_MINUTES,
+                )
+        except (discord.HTTPException, ValueError):
+            log.exception("strategy 1 (message.create_thread) failed")
+
+    # Strategy 2: starter-less thread directly on the channel. Loses
+    # the "anchored under the answer" visual, but still gives us a
+    # thread for follow-ups.
+    if channel is not None and hasattr(channel, "create_thread"):
+        try:
+            return await channel.create_thread(
+                name=name,
+                auto_archive_duration=THREAD_AUTO_ARCHIVE_MINUTES,
+                type=discord.ChannelType.public_thread,
+            )
+        except (discord.HTTPException, TypeError):
+            # TypeError: `type=` unsupported in some older discord.py
+            # versions. Retry without it.
+            try:
+                return await channel.create_thread(
+                    name=name,
+                    auto_archive_duration=THREAD_AUTO_ARCHIVE_MINUTES,
+                )
+            except discord.HTTPException:
+                log.exception("strategy 2 (channel.create_thread) failed")
+
+    return None
+
+
 # Discord hard-caps messages at 2000 chars. Leave ~100 char headroom for
 # inline markup Discord adds server-side and to avoid edge-case off-by-ones.
 DISCORD_MSG_LIMIT = 1900
@@ -492,27 +566,30 @@ async def ask(
     answer_msg = await interaction.followup.send(messages[0], wait=True)
     try:
         thread_name = (query or "follow-up").strip()[:THREAD_NAME_LIMIT] or "follow-up"
-        # `followup.send` returns a WebhookMessage which — on some
-        # discord.py versions — does not carry guild context, so calling
-        # `.create_thread()` on it raises "message does not have guild
-        # info attached". Re-fetching the message through the channel
-        # returns a full Message with the guild attached.
-        starter: discord.Message
-        if interaction.channel is not None and hasattr(interaction.channel, "fetch_message"):
-            try:
-                starter = await interaction.channel.fetch_message(answer_msg.id)
-            except discord.HTTPException:
-                starter = answer_msg  # fall through; may still work
-        else:
-            starter = answer_msg
-        thread = await starter.create_thread(
+        # Thread creation requires a guild-attached Message. In current
+        # discord.py `interaction.channel` is a PartialMessageable for
+        # interactions, so `partial.fetch_message(...)` returns a Message
+        # whose `.guild` is None — good enough for most operations but
+        # rejected by `Message.create_thread`. Resolving the real
+        # TextChannel via `interaction.guild.get_channel(...)` gives us a
+        # channel that carries the guild link, and fetching through THAT
+        # gives a Message with .guild attached.
+        thread = await _open_followup_thread(
+            interaction=interaction,
+            answer_msg=answer_msg,
             name=thread_name,
-            auto_archive_duration=THREAD_AUTO_ARCHIVE_MINUTES,
         )
         # Post any remaining chunks inside the thread so they stay with
         # the original answer and don't spam the channel.
-        for part in messages[1:]:
-            await thread.send(part, silent=True)
+        if thread is not None:
+            for part in messages[1:]:
+                await thread.send(part, silent=True)
+        else:
+            # No thread — fall back to spamming remaining chunks as
+            # followups on the original interaction so the user at least
+            # sees the full answer.
+            for part in messages[1:]:
+                await interaction.followup.send(part)
     except (discord.HTTPException, ValueError):
         # Thread creation can fail (DMs, missing perms, non-guild
         # channel). The user still has the answer; log and move on.
