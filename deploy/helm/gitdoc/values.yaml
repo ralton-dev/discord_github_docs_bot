@@ -7,15 +7,15 @@ nameOverride: ""
 images:
   bot:
     repository: ghcr.io/ralton-dev/gitdoc-discord-bot
-    tag: "0.0.7"
+    tag: "0.0.8"
     pullPolicy: IfNotPresent
   rag:
     repository: ghcr.io/ralton-dev/gitdoc-rag
-    tag: "0.0.7"
+    tag: "0.0.8"
     pullPolicy: IfNotPresent
   ingestion:
     repository: ghcr.io/ralton-dev/gitdoc-ingestion
-    tag: "0.0.7"
+    tag: "0.0.8"
     pullPolicy: IfNotPresent
 
 repo:
