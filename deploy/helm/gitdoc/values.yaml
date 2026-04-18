@@ -137,6 +137,13 @@ webhook:
   # GET /status/ingestion?repo=<slug> reports this as "ok" or "stale".
   stalenessThresholdSecs: 7200
 
+# Query cache (plan 13). Short-circuits /ask when the same normalized
+# query has been answered for the current commit_sha of the repo.
+# Disable to force every request through retrieval + LLM (useful when
+# benchmarking cold-cache latency or isolating a stale-answer bug).
+queryCache:
+  enabled: true
+
 # Observability (plan 09). The rag Service exposes /metrics in Prometheus
 # text format unconditionally; this block controls whether a ServiceMonitor
 # custom resource is rendered so the Prometheus Operator picks it up. Leave

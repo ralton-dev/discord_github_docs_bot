@@ -35,6 +35,23 @@ TOKENS_COMPLETION_TOTAL = Counter(
     ("repo", "model"),
 )
 
+# Query cache (plan 13). Hit/miss split per repo so operators can compute
+# the hit rate as `rate(hits) / (rate(hits) + rate(misses))` — that's the
+# "is the cache actually earning its keep?" dashboard tile. No latency
+# metric: cache hits skip the slow path entirely, so `gitdoc_latency_seconds`
+# already tells that story.
+CACHE_HITS_TOTAL = Counter(
+    "gitdoc_cache_hits_total",
+    "Query cache hits",
+    ("repo",),
+)
+
+CACHE_MISSES_TOTAL = Counter(
+    "gitdoc_cache_misses_total",
+    "Query cache misses",
+    ("repo",),
+)
+
 # --- Histograms -------------------------------------------------------------
 
 # Retrieval returns between 0 and top_k rows (top_k<=20). Buckets picked to

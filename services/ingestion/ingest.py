@@ -192,6 +192,23 @@ def main() -> None:
                     },
                 )
 
+                # Query cache (plan 13) is keyed on (repo, commit_sha,
+                # query_hash); a new commit_sha makes every prior cached
+                # answer potentially stale. Drop them so the next /ask
+                # re-runs retrieval against the fresh chunks.
+                cache_deleted = conn.execute(
+                    "DELETE FROM query_cache WHERE repo = %s AND commit_sha <> %s",
+                    (REPO_NAME, sha),
+                ).rowcount
+                log.info(
+                    "invalidated %d stale query_cache rows" % cache_deleted,
+                    extra={
+                        "event": "ingest.cache_invalidated",
+                        "repo": REPO_NAME,
+                        "deleted": cache_deleted,
+                    },
+                )
+
                 conn.execute(
                     "UPDATE ingest_runs SET finished_at=now(), chunk_count=%s, status='ok' "
                     "WHERE id=%s",

@@ -120,6 +120,16 @@ secrets:
 #   stalenessThresholdSecs: 7200
 
 # ---------------------------------------------------------------------------
+# Query cache (optional, see docs/retrieval.md "Query cache"). On by
+# default — short-circuits /ask when the same normalized query has
+# already been answered for the repo's latest commit_sha, using the
+# Postgres `query_cache` table. Invalidation is natural: a new
+# ingestion run (new commit_sha) evicts the old rows.
+# ---------------------------------------------------------------------------
+# queryCache:
+#   enabled: false
+
+# ---------------------------------------------------------------------------
 # Discord — guildAllowlist gates the /ask command. Empty = allow every guild
 # the bot is invited to. For a homelab single-server setup, lock it down to
 # the one guild ID.

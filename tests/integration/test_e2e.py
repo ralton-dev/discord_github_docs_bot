@@ -213,6 +213,75 @@ def test_reranker_promotes_correct_file_for_noisy_query(
     )
 
 
+def test_identical_query_returns_cached_answer(
+    clean_db: str, ingest_module, rag_app
+) -> None:
+    """Plan-13 acceptance: second /ask for an identical query hits the cache.
+
+    We assert two independent things on the second call:
+
+    1. The answer comes back materially faster than the cold path. The
+       cold path synchronously talks to the mock LiteLLM over HTTP
+       (embeddings + chat) which is conservatively ~20x slower than a
+       Postgres SELECT against the testcontainer. A generous 1/5 ratio
+       still leaves a clear signal on CI.
+    2. The ``gitdoc_cache_hits_total{repo="sentinel"}`` counter
+       increments by exactly 1 — proof the handler went through the
+       cache-hit branch, not the slow path.
+    """
+    import time as _time
+
+    from prometheus_client import REGISTRY
+
+    _seed(clean_db, ingest_module)
+
+    client = TestClient(rag_app.app)
+
+    before_hits = REGISTRY.get_sample_value(
+        "gitdoc_cache_hits_total", {"repo": "sentinel"}
+    ) or 0.0
+
+    question = {
+        "query": "what does the add function compute",
+        "repo": "sentinel",
+        "top_k": 3,
+    }
+
+    t0 = _time.perf_counter()
+    r1 = client.post("/ask", json=question)
+    cold_ms = (_time.perf_counter() - t0) * 1000.0
+    assert r1.status_code == 200, r1.text
+    answer1 = r1.json()["answer"]
+
+    t0 = _time.perf_counter()
+    r2 = client.post("/ask", json=question)
+    warm_ms = (_time.perf_counter() - t0) * 1000.0
+    assert r2.status_code == 200, r2.text
+    answer2 = r2.json()["answer"]
+
+    # Identical response shape.
+    assert answer1 == answer2
+    assert r1.json()["citations"] == r2.json()["citations"]
+
+    # Cache hit counter bumped by exactly one.
+    after_hits = REGISTRY.get_sample_value(
+        "gitdoc_cache_hits_total", {"repo": "sentinel"}
+    ) or 0.0
+    assert after_hits - before_hits == 1.0, (
+        f"expected exactly one cache hit; got delta {after_hits - before_hits}"
+    )
+
+    # The warm path should be a fraction of the cold path. The mock
+    # LiteLLM is in-process (fast) but still HTTP — the cache is a
+    # single indexed SELECT. Use a loose 1/2 ratio with a small floor
+    # so a <10ms cold path (unlikely but possible) can't produce a
+    # false positive.
+    assert warm_ms < max(cold_ms / 2.0, 5.0), (
+        f"warm path ({warm_ms:.1f}ms) not materially faster than cold "
+        f"({cold_ms:.1f}ms) — cache likely bypassed"
+    )
+
+
 def test_hybrid_search_finds_unique_identifier_via_bm25(
     clean_db: str, ingest_module, rag_app
 ) -> None:

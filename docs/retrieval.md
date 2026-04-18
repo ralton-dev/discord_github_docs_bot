@@ -1,9 +1,9 @@
 # Retrieval
 
 How the rag orchestrator picks the chunks it shows the chat model. Today
-this covers **hybrid search** (plan 11) and the **cross-encoder reranker**
-(plan 12). Future Wave 5 work — the query cache (plan 13) and request
-rate-limiting (plan 14) — will land here as it ships.
+this covers **hybrid search** (plan 11), the **cross-encoder reranker**
+(plan 12), and the **query cache** (plan 13). Rate-limiting (plan 14) is
+the next wave-5 item and will land here as it ships.
 
 ## Hybrid search
 
@@ -236,3 +236,121 @@ reranker:
 (then `helm upgrade --install`) — or leave `reranker.url` empty. Both
 short-circuit the rerank step entirely; `/ask` runs as if the reranker
 weren't installed.
+
+## Query cache
+
+In a busy Discord channel the same FAQ gets asked daily. Re-running
+retrieval and the LLM for every repeat is pure waste. The **query
+cache** short-circuits `/ask` when the same normalized question has
+already been answered against the repo's current `commit_sha`, serving
+the stored answer + citations straight out of Postgres without a single
+embedding or chat call.
+
+### What's keyed
+
+The primary key is `(repo, commit_sha, query_hash)`:
+
+- **`repo`** — the per-instance slug, same one the `chunks` table is
+  keyed on.
+- **`commit_sha`** — the most recent `status='ok'` row in
+  `ingest_runs` for that repo, cached in-process for 15s.
+- **`query_hash`** — SHA-256 of the query string after
+  **normalisation**.
+
+### Normalisation
+
+The query is lowercased and its whitespace collapsed before hashing.
+So `"What is X?"`, `"  what  IS  x?  "`, and `"WHAT IS X?"` all hit the
+same cache row. Punctuation is preserved — two questions that differ
+only in phrasing land on the same row, but semantically different ones
+(different punctuation, different words, different order) must not.
+
+### Invalidation
+
+Eviction is driven by the ingestion path, not by a wall-clock TTL. When
+a new ingestion run completes successfully with a different
+`commit_sha`, the ingest job runs:
+
+```sql
+DELETE FROM query_cache WHERE repo = %s AND commit_sha <> %s;
+```
+
+So every cached answer for the prior commit is dropped in the same
+transaction that GC'd the prior chunks. The `commit_sha` key means a
+stale answer can't accidentally leak across ingestions even if the
+delete raced — a read against the old SHA would simply return a miss
+because the in-process 15s cache on `_latest_commit_sha` has already
+rolled over.
+
+### Metrics
+
+Two counters on the default Prometheus registry, both labelled by
+`repo`:
+
+- `gitdoc_cache_hits_total{repo=…}`
+- `gitdoc_cache_misses_total{repo=…}`
+
+**PromQL for cache hit rate over the last 5 minutes**:
+
+```promql
+sum by (repo) (rate(gitdoc_cache_hits_total[5m]))
+/
+(
+  sum by (repo) (rate(gitdoc_cache_hits_total[5m]))
+  + sum by (repo) (rate(gitdoc_cache_misses_total[5m]))
+)
+```
+
+A healthy FAQ-heavy channel sits in the 0.3-0.7 range. A hit rate
+near 0 means either nobody is re-asking (fine), ingestion is too
+frequent (invalidation is churning the cache faster than users hit
+repeats), or the cache is disabled. Near 1.0 = basically every query
+has been asked before (still fine — this is pure latency win).
+
+Cache hits appear in `gitdoc_queries_total` under
+`status="cache_hit"` — separate from the `ok` bucket so dashboards can
+distinguish cached from fresh answers at a glance.
+
+### Disabling
+
+On by default. Flip off per-instance with:
+
+```yaml
+queryCache:
+  enabled: false
+```
+
+…then `helm upgrade --install`. The env var `QUERY_CACHE_ENABLED` is
+read at import time, so the flag-flip takes effect on the next pod
+roll (which `helm upgrade` triggers automatically). Use this when:
+
+- Benchmarking the cold path (otherwise the repeat runs show up as
+  spuriously fast).
+- Isolating a suspected stale-answer bug — disable, upgrade, then
+  compare responses against the cached-on version.
+- Running a model change where the operator wants every answer
+  re-generated under the new chat model without waiting for ingestion
+  to evict.
+
+### Operational notes
+
+- Cache DB calls are wrapped in try/except — a flaky Postgres degrades
+  to "every request misses" rather than failing `/ask`. Watch for
+  `query_cache lookup failed` / `query_cache insert failed` log
+  events if the hit rate collapses unexpectedly.
+- Write-through uses `ON CONFLICT (repo, commit_sha, query_hash) DO
+  NOTHING`, so a race between concurrent slow-path requests on the
+  same question is safe — both answers are valid for the same
+  commit_sha, the first writer wins.
+- Empty-citation answers (the "I couldn't find anything relevant"
+  path) and any error response are **never** cached — we don't want
+  to pin a no-op response that ingestion didn't cause.
+- The `hits` column bumps on every cache hit. Handy for "what are the
+  most asked questions?" analytics:
+  ```sql
+  SELECT repo, left(answer, 80) AS answer_preview, hits, created_at
+  FROM query_cache
+  WHERE hits > 0
+  ORDER BY hits DESC
+  LIMIT 20;
+  ```

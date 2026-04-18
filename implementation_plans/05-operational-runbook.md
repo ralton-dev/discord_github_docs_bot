@@ -494,3 +494,95 @@ Release workflow notes:
   POST-retrieve / PRE-LLM region of `/ask`. Task 13 (query cache) and
   task 14 (rate limiting) will both insert ABOVE the embedding call —
   separate region, no collision with the reranker block.
+
+---
+
+## Appendix: Drafted from task 13
+
+> Captured while wiring the query cache (`query_cache` table +
+> `CACHE_HITS_TOTAL` / `CACHE_MISSES_TOTAL` counters + chart values)
+> into `services/rag/app.py` and the ingestion GC step. When task 05
+> writes the full runbook, fold this into the "Daily ops / retrieval"
+> and "Debugging" sections. Full reference lives in
+> `docs/retrieval.md` "Query cache"; the runbook only needs the
+> operator one-liners below.
+
+- **The cache is ON by default.** No action required on existing
+  instances after `helm upgrade --install` — the migration Job
+  creates the `query_cache` table, the chart injects
+  `QUERY_CACHE_ENABLED=true`. Hit rate starts at 0% and climbs as
+  repeat questions come in.
+
+- **Invalidation is driven by ingestion, not wall-clock TTL.** The
+  ingest job runs
+  `DELETE FROM query_cache WHERE repo = ? AND commit_sha <> ?` after
+  the chunk GC, so every cached answer for the prior `commit_sha`
+  disappears in the same transaction. `/ask` resolves
+  `commit_sha` via a per-repo 15s in-process cache, so the worst-
+  case window where the rag pod hasn't yet noticed a fresh ingestion
+  is ~15s — during which cache hits are simply against the previous
+  SHA's stored answers (correct but marginally outdated) and cache
+  writes go to the old SHA's bucket (also eventually invalidated).
+
+- **Monitoring hit rate.** The dashboard tile every operator will
+  want:
+  ```promql
+  sum by (repo) (rate(gitdoc_cache_hits_total[5m]))
+  /
+  (
+    sum by (repo) (rate(gitdoc_cache_hits_total[5m]))
+    + sum by (repo) (rate(gitdoc_cache_misses_total[5m]))
+  )
+  ```
+  FAQ-heavy channels typically sit 0.3-0.7. Drop from a steady rate
+  to ~0 without a deploy change = ingestion is churning too often
+  (check `ingest_runs` cadence) or a DB issue is silently failing
+  the lookup (`kubectl logs … | jq 'select(.event | test("query_cache"))'`).
+
+- **`status="cache_hit"` in `gitdoc_queries_total`.** Cache hits are
+  counted under their own status label, separate from `ok`. Sum both
+  for "total successful /ask" dashboards; look at `cache_hit` alone
+  for "how much LLM budget did we skip?"
+
+- **Popular questions query.**
+  ```sql
+  SELECT repo, left(answer, 80) AS preview, hits, created_at
+  FROM query_cache
+  WHERE hits > 0
+  ORDER BY hits DESC
+  LIMIT 20;
+  ```
+  Useful for FAQ authoring — the top hits are the questions worth
+  writing canonical docs for.
+
+- **Disabling without a full redeploy is not a thing.** Like every
+  other feature flag in this service, `QUERY_CACHE_ENABLED` is read
+  at import time. Flip `queryCache.enabled: false` in values then
+  `helm upgrade --install` to roll the rag pods. Emergency kill
+  switch (cache seems to be serving stale answers): set the values
+  flag, upgrade, then
+  `kubectl -n gitdoc-<slug> exec deploy/gitdoc-<slug>-rag -- psql
+  "$POSTGRES_DSN" -c "TRUNCATE query_cache"` to force every future
+  request through the slow path. Re-enable once confident.
+
+- **Graceful degrade.** Every cache DB call is wrapped in
+  try/except — a wedged Postgres surfaces as log lines
+  `query_cache lookup failed` / `query_cache insert failed` and the
+  /ask request proceeds through the slow path. The user never sees
+  a 500 because of a cache problem.
+
+- **Cache row shape.** `citations` is JSONB and must mirror the
+  `AskResponse.citations` schema exactly (`[{"path": …, "commit_sha":
+  …}, …]`). When decoding, `/ask` tolerates both Python-decoded
+  lists (normal psycopg case) and raw strings (older driver
+  configs). A corrupt row logs
+  `query_cache row decode failed; falling through` and the request
+  falls through to the slow path — the corrupt row stays in place
+  until invalidation.
+
+- **Seam reserved for task 14.** Rate limiting will insert ABOVE
+  the query-cache block in `/ask`. Rationale: a rate-limited
+  request must not be allowed to consume a cache hit either (it's
+  still a request, still costs wall-clock and concurrency). The
+  region at the TOP of `/ask` stays clean — task 14 slots in above
+  `_query_hash`, no collision with cache logic.

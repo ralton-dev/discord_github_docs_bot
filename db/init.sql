@@ -52,3 +52,24 @@ CREATE TABLE IF NOT EXISTS instance_settings (
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_by  TEXT
 );
+
+-- Query cache (plan 13). Short-circuits /ask when the same normalized
+-- query has been answered against the same commit_sha. The (repo,
+-- commit_sha, query_hash) primary key is the natural cache key; rows are
+-- invalidated when a new ingestion run produces a new commit_sha for the
+-- repo (see services/ingestion/ingest.py GC step). `citations` mirrors
+-- the /ask response shape as a JSONB array of {path, commit_sha}. `hits`
+-- is bumped on each cache hit for cheap "which answers are popular"
+-- analytics without needing a separate metric-side query.
+CREATE TABLE IF NOT EXISTS query_cache (
+    repo        TEXT NOT NULL,
+    commit_sha  TEXT NOT NULL,
+    query_hash  TEXT NOT NULL,
+    answer      TEXT NOT NULL,
+    citations   JSONB NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    hits        INT NOT NULL DEFAULT 0,
+    PRIMARY KEY (repo, commit_sha, query_hash)
+);
+CREATE INDEX IF NOT EXISTS query_cache_repo_created_idx
+    ON query_cache (repo, created_at DESC);

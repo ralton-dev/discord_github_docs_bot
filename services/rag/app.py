@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import json
 import logging
 import math
 import os
@@ -48,6 +50,12 @@ RERANKER_ENABLED = os.environ.get("RERANKER_ENABLED", "false").lower() == "true"
 RERANKER_URL = os.environ.get("RERANKER_URL", "")
 RERANKER_MODEL = os.environ.get("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
 RERANKER_MULT = int(os.environ.get("RERANKER_MULT", "3"))
+
+# Query cache (plan 13). Short-circuits /ask when the same normalized
+# query has already been answered against the repo's current commit_sha.
+# Disable to force every request through retrieval + LLM (useful for
+# benchmarking cold-cache latency or isolating a stale-answer bug).
+QUERY_CACHE_ENABLED = os.environ.get("QUERY_CACHE_ENABLED", "true").lower() == "true"
 
 # Webhook settings. WEBHOOK_SECRET is optional at import time so the service
 # still runs on instances that leave webhooks disabled (webhook.enabled=false
@@ -135,6 +143,90 @@ def _get_chat_model_for_repo(repo: str) -> str:
 
 def _invalidate_settings_cache(repo: str) -> None:
     _settings_cache.pop(repo, None)
+
+
+# ---------------------------------------------------------------------------
+# Query cache helpers (plan 13).
+#
+# Normalisation: lowercase + collapse whitespace. "What is X?" and
+# "  what is  x? " hash to the same bucket. We deliberately KEEP the
+# trailing "?" and any other punctuation — two questions that differ
+# only in phrasing (punctuation, casing, whitespace) should hit the same
+# cache row, but semantically different ones must not.
+#
+# The commit_sha key is a per-repo 15s-cached lookup against ingest_runs
+# so /ask does not touch Postgres just to resolve it on every hot
+# request. A fresh ingestion invalidates the cache on the ingestion side
+# (ingest.py GC step); the 15s TTL here is just "how quickly does a
+# brand-new ingestion become visible to the cache layer" — the cached
+# answers for the new SHA are keyed on it naturally, so stale reads
+# during the TTL window don't surface stale content, just cause a brief
+# cache-miss stretch after an ingest completes.
+# ---------------------------------------------------------------------------
+
+
+_COMMIT_TTL = 15.0
+_commit_cache: dict[str, tuple[str | None, float]] = {}
+
+
+def _normalize_query(q: str) -> str:
+    """Lowercase + collapse whitespace for deterministic hashing.
+
+    Intentionally preserves punctuation — two questions that differ
+    only in case or whitespace should hit the same cache row; ones that
+    differ in meaning must not.
+    """
+    return " ".join(q.lower().split())
+
+
+def _query_hash(q: str) -> str:
+    """SHA-256 of the normalized query string. Deterministic, 64 hex chars."""
+    return hashlib.sha256(_normalize_query(q).encode("utf-8")).hexdigest()
+
+
+def _latest_commit_sha(repo: str) -> str | None:
+    """Return the most recent successful ``commit_sha`` for ``repo``.
+
+    Cached per-repo for ``_COMMIT_TTL`` so the /ask hot path does not
+    hit Postgres twice (once here, once for the cache lookup) on every
+    request. None is returned when no successful ingestion exists yet —
+    callers should skip cache lookup in that case, because there is
+    nothing that could have populated the cache anyway.
+
+    DB errors are swallowed and treated as "no SHA available" so a
+    flaky DB degrades gracefully to "cache disabled for this request"
+    without taking down /ask.
+    """
+    now = _clock()
+    cached = _commit_cache.get(repo)
+    if cached is not None and (now - cached[1]) < _COMMIT_TTL:
+        return cached[0]
+    try:
+        with psycopg.connect(PG_DSN, connect_timeout=3, autocommit=True) as conn:
+            row = conn.execute(
+                """
+                SELECT commit_sha
+                FROM ingest_runs
+                WHERE repo = %s AND status = 'ok'
+                ORDER BY finished_at DESC NULLS LAST, started_at DESC
+                LIMIT 1
+                """,
+                (repo,),
+            ).fetchone()
+    except Exception:
+        log.exception("latest_commit_sha lookup failed")
+        return None
+    sha = row[0] if row else None
+    _commit_cache[repo] = (sha, now)
+    return sha
+
+
+def _invalidate_commit_cache(repo: str | None = None) -> None:
+    """Drop cached commit SHAs. Pass None to clear every repo."""
+    if repo is None:
+        _commit_cache.clear()
+    else:
+        _commit_cache.pop(repo, None)
 
 
 class AskRequest(BaseModel):
@@ -289,12 +381,83 @@ def ask(req: AskRequest):
     hits = 0
     prompt_tokens = 0
     completion_tokens = 0
+    cache_commit_sha: str | None = None
+    qhash: str | None = None
     # ------------------------------------------------------------------
-    # Pre-retrieval gates — keep this region short. Task 13 (query cache)
-    # and task 14 (rate limiting) will both insert here, BEFORE the
-    # embedding call: cache short-circuits with a stored response,
-    # rate-limit returns 429. Anything below this point is the slow path.
+    # Pre-retrieval gates — keep this region short. Task 14 (rate
+    # limiting) will insert ABOVE the query-cache block: a rate-limited
+    # request must not consume a cache hit either, so the gate has to
+    # come first. Anything below this point is the slow path.
     # ------------------------------------------------------------------
+    # Query cache (plan 13). Compute the hash once so both the lookup
+    # and the later INSERT share the same value. `_latest_commit_sha`
+    # returns None before the first successful ingestion — in that case
+    # there is nothing that could have been cached, so fall through.
+    qhash = _query_hash(req.query)
+    if QUERY_CACHE_ENABLED:
+        cache_commit_sha = _latest_commit_sha(req.repo)
+        if cache_commit_sha is not None:
+            row: tuple | None = None
+            try:
+                with psycopg.connect(
+                    PG_DSN, connect_timeout=3, autocommit=True
+                ) as conn:
+                    row = conn.execute(
+                        """
+                        SELECT answer, citations
+                        FROM query_cache
+                        WHERE repo = %s AND commit_sha = %s AND query_hash = %s
+                        """,
+                        (req.repo, cache_commit_sha, qhash),
+                    ).fetchone()
+                    if row is not None:
+                        conn.execute(
+                            """
+                            UPDATE query_cache
+                               SET hits = hits + 1
+                             WHERE repo = %s
+                               AND commit_sha = %s
+                               AND query_hash = %s
+                            """,
+                            (req.repo, cache_commit_sha, qhash),
+                        )
+            except Exception:
+                log.exception(
+                    "query_cache lookup failed; falling through to slow path"
+                )
+                row = None
+            if row is not None:
+                status = "cache_hit"
+                answer_text, citations_json = row
+                metrics.CACHE_HITS_TOTAL.labels(req.repo).inc()
+                log.info(
+                    "ask served from cache",
+                    extra={
+                        "event": "ask.cache_hit",
+                        "repo": req.repo,
+                        "commit_sha": cache_commit_sha,
+                    },
+                )
+                try:
+                    # citations is JSONB — psycopg decodes to list/dict already.
+                    # Fall back to json.loads if a driver returns the raw text.
+                    if isinstance(citations_json, (str, bytes, bytearray)):
+                        citations_raw = json.loads(citations_json)
+                    else:
+                        citations_raw = citations_json
+                    citations = [Citation(**c) for c in citations_raw]
+                    elapsed = time.perf_counter() - start
+                    metrics.LATENCY_SECONDS.labels("ask").observe(elapsed)
+                    metrics.QUERIES_TOTAL.labels(req.repo, status).inc()
+                    return AskResponse(answer=answer_text, citations=citations)
+                except Exception:
+                    # Corrupt cache row — log and fall through to the
+                    # normal path rather than 500-ing on the user.
+                    log.exception(
+                        "query_cache row decode failed; falling through"
+                    )
+            else:
+                metrics.CACHE_MISSES_TOTAL.labels(req.repo).inc()
     # Resolve the active model per-request (plan 17). Cache means this is
     # cheap on the hot path; falls back to CHAT_MODEL when no override is set.
     model = _get_chat_model_for_repo(req.repo)
@@ -408,10 +571,42 @@ def ask(req: AskRequest):
             completion, req.repo, model,
         )
         status = "ok"
-        return AskResponse(
-            answer=completion.choices[0].message.content or "",
-            citations=[Citation(path=p, commit_sha=s) for p, s, _, _ in rows],
-        )
+        answer_text = completion.choices[0].message.content or ""
+        citations = [Citation(path=p, commit_sha=s) for p, s, _, _ in rows]
+
+        # Write-through cache (plan 13). Only on the "ok" path with
+        # non-empty citations — empty/error responses are never cached.
+        # A concurrent /ask racing this INSERT is harmless: both answers
+        # are valid for the same commit_sha, ON CONFLICT DO NOTHING
+        # keeps whichever arrived first.
+        if QUERY_CACHE_ENABLED and cache_commit_sha is not None and citations:
+            try:
+                with psycopg.connect(
+                    PG_DSN, connect_timeout=3, autocommit=True
+                ) as conn:
+                    conn.execute(
+                        """
+                        INSERT INTO query_cache
+                            (repo, commit_sha, query_hash, answer, citations)
+                        VALUES (%s, %s, %s, %s, %s::jsonb)
+                        ON CONFLICT (repo, commit_sha, query_hash) DO NOTHING
+                        """,
+                        (
+                            req.repo,
+                            cache_commit_sha,
+                            qhash,
+                            answer_text,
+                            json.dumps(
+                                [c.model_dump() for c in citations]
+                            ),
+                        ),
+                    )
+            except Exception:
+                log.exception(
+                    "query_cache insert failed; answer still returned"
+                )
+
+        return AskResponse(answer=answer_text, citations=citations)
     finally:
         elapsed = time.perf_counter() - start
         metrics.LATENCY_SECONDS.labels("ask").observe(elapsed)

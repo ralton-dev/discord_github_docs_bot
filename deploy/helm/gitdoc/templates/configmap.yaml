@@ -21,6 +21,7 @@ data:
   RERANKER_URL: {{ .Values.reranker.url | quote }}
   RERANKER_MODEL: {{ .Values.reranker.model | quote }}
   RERANKER_MULT: "{{ .Values.reranker.candidatesMultiplier }}"
+  QUERY_CACHE_ENABLED: "{{ .Values.queryCache.enabled }}"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -68,3 +69,19 @@ data:
         chunk_count   INT,
         status        TEXT NOT NULL DEFAULT 'running'
     );
+
+    -- Query cache (plan 13). Answers are keyed by
+    -- (repo, commit_sha, query_hash); ingestion invalidates stale rows on
+    -- new commit_sha. See docs/retrieval.md.
+    CREATE TABLE IF NOT EXISTS query_cache (
+        repo        TEXT NOT NULL,
+        commit_sha  TEXT NOT NULL,
+        query_hash  TEXT NOT NULL,
+        answer      TEXT NOT NULL,
+        citations   JSONB NOT NULL,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+        hits        INT NOT NULL DEFAULT 0,
+        PRIMARY KEY (repo, commit_sha, query_hash)
+    );
+    CREATE INDEX IF NOT EXISTS query_cache_repo_created_idx
+        ON query_cache (repo, created_at DESC);
