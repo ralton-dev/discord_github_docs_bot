@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import math
 import os
@@ -14,6 +15,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 
 import metrics
+import reranker as reranker_mod
 from logging_config import configure as configure_logging
 from webhook import RateLimiter, SignatureError, verify_signature
 
@@ -36,6 +38,16 @@ HYBRID_SEARCH_ENABLED = os.environ.get("HYBRID_SEARCH_ENABLED", "true").lower() 
 # flattens the contribution of top-of-list ranks, lower k makes top ranks
 # dominate. Tune if recall on a specific corpus looks off.
 RRF_K = 60
+
+# Cross-encoder reranker (plan 12). When both the feature flag and the URL
+# are set, ``/ask`` widens retrieval to ``top_k * RERANKER_MULT`` candidates,
+# scores them with a cross-encoder, and keeps the top ``top_k``. Disabled
+# by default — operators opt in via the chart's ``reranker.enabled`` once a
+# reranker endpoint is provisioned (typically on the homelab Ollama).
+RERANKER_ENABLED = os.environ.get("RERANKER_ENABLED", "false").lower() == "true"
+RERANKER_URL = os.environ.get("RERANKER_URL", "")
+RERANKER_MODEL = os.environ.get("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
+RERANKER_MULT = int(os.environ.get("RERANKER_MULT", "3"))
 
 # Webhook settings. WEBHOOK_SECRET is optional at import time so the service
 # still runs on instances that leave webhooks disabled (webhook.enabled=false
@@ -307,7 +319,51 @@ def ask(req: AskRequest):
                 status_code=502, detail="embedding backend unavailable"
             ) from exc
 
-        rows = _retrieve(req.repo, req.query, emb, req.top_k)
+        # Rerank-aware retrieval width: when the cross-encoder is wired up,
+        # we pull a wider initial pool (top_k * RERANKER_MULT) so the
+        # reranker has enough candidates to actually re-order. When it is
+        # off, behaviour is identical to before (just top_k).
+        rerank_active = bool(RERANKER_ENABLED and RERANKER_URL)
+        retrieve_n = req.top_k * RERANKER_MULT if rerank_active else req.top_k
+        rows = _retrieve(req.repo, req.query, emb, retrieve_n)
+
+        if rerank_active and rows:
+            # Convert the tuple rows to dicts for the reranker, then back
+            # again, keeping every original field intact. The reranker is
+            # responsible for graceful degrade — it returns the input list
+            # unchanged on any failure — so we always end up with a usable
+            # `rows` value here.
+            candidates = [
+                {
+                    "path": p,
+                    "commit_sha": s,
+                    "content": c,
+                    "content_type": ctype,
+                }
+                for p, s, c, ctype in rows
+            ]
+            try:
+                with metrics.timed(metrics.RERANK_LATENCY_SECONDS):
+                    reranked = asyncio.run(
+                        reranker_mod.rerank(
+                            req.query,
+                            candidates,
+                            url=RERANKER_URL,
+                            model=RERANKER_MODEL,
+                        )
+                    )
+            except Exception:
+                # Defensive backstop — `rerank()` already swallows its own
+                # failures, but if a programming error or unexpected
+                # exception escapes (e.g. asyncio loop weirdness), we still
+                # want /ask to succeed with the un-reranked rows.
+                log.exception("rerank call raised; falling back to retrieval order")
+                reranked = candidates
+            rows = [
+                (c["path"], c["commit_sha"], c["content"], c["content_type"])
+                for c in reranked[: req.top_k]
+            ]
+
         hits = len(rows)
         metrics.RETRIEVAL_HITS.labels(req.repo).observe(hits)
 

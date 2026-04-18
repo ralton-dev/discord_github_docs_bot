@@ -409,3 +409,88 @@ Release workflow notes:
   (reranker) wraps its output. The TOP of the `/ask` handler, before
   the embedding call, is reserved as the insertion point for task 13
   (query cache short-circuit) and task 14 (rate-limit gate).
+
+---
+
+## Appendix: Drafted from task 12
+
+> Captured while wiring the cross-encoder reranker (`reranker.py` +
+> `RERANK_LATENCY_SECONDS` + chart values) between retrieval and the LLM
+> call in `services/rag/app.py`. When task 05 writes the full runbook,
+> fold this into the "Daily ops / retrieval" and "Debugging" sections.
+> Full reranker reference lives in `docs/retrieval.md`; the runbook only
+> needs the operator one-liners below.
+
+- **The reranker is OFF by default.** No effect on existing instances
+  until `reranker.enabled=true` AND `reranker.url=<reachable endpoint>`
+  are both set in the per-instance values file. The empty-URL
+  short-circuit means a half-configured rollout silently falls back to
+  un-reranked retrieval — no broken /ask requests, but also no quality
+  win. Confirm both via `kubectl get cm gitdoc-<slug>-config -o yaml |
+  grep RERANKER_`.
+
+- **Provisioning a reranker endpoint.** Two routes:
+  1. **Ollama** — pull `bge-reranker-v2-m3` and point at the host. Some
+     Ollama builds expose `/api/rerank` directly; older builds need a
+     small adapter in front. The integration test in
+     `tests/integration/test_e2e.py` uses a fake reranker so CI does
+     not need a live endpoint.
+  2. **LiteLLM `/v1/rerank`** — already in the cluster. Response shape
+     differs (`{"results": [{"index": int, "relevance_score": float}]}`
+     vs our `{"scores": [float]}`), so put a thin FastAPI adapter in
+     front and point `reranker.url` at the adapter.
+
+- **Verifying the reranker is being called.** `gitdoc_rerank_latency_seconds`
+  has zero observations until at least one /ask runs against an enabled
+  pod. Quick check:
+  ```sh
+  kubectl -n gitdoc-<slug> port-forward svc/gitdoc-<slug>-rag 8000:8000
+  curl -s http://localhost:8000/metrics | grep gitdoc_rerank_latency
+  ```
+  Sum > 0 = the reranker is in the path. If the sum stays at 0 after
+  several /ask calls, either `RERANKER_ENABLED` is false or
+  `RERANKER_URL` is empty in the rendered ConfigMap.
+
+- **Spotting graceful-degrade in the wild.** When the reranker errors,
+  the rag pod logs `WARN`-level events with `event` fields starting
+  `rerank.` — `rerank.transport_error`, `rerank.http_error`,
+  `rerank.malformed_response`, `rerank.bad_json`, `rerank.non_numeric_scores`.
+  Operator one-liner:
+  ```sh
+  kubectl -n gitdoc-<slug> logs deploy/gitdoc-<slug>-rag --tail=500 \
+    | jq -c 'select(.event | startswith("rerank."))'
+  ```
+  Spike in any of these = the reranker is sick but /ask is still
+  working (un-reranked rows). Triage the upstream endpoint first, not
+  the rag pod.
+
+- **Latency budget violations.** Buckets in `gitdoc_rerank_latency_seconds`
+  are `(0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0)`. Anything in the 2-5s
+  bucket needs investigation; the default 5s timeout means a wedged
+  endpoint trips graceful-degrade rather than slowing /ask. PromQL for
+  "are we beyond budget?":
+  ```promql
+  histogram_quantile(0.95, sum(rate(gitdoc_rerank_latency_seconds_bucket[5m])) by (le))
+  ```
+  Target < 0.5s for `top_k=6`. >0.5s sustained = either bump the
+  multiplier down, switch to a smaller cross-encoder (`bge-reranker-base`),
+  or move the model to a faster host.
+
+- **`candidatesMultiplier` is the recall lever.** Default 3 →
+  `top_k * 3` candidates. Bump to 4-5 when the right answer reliably
+  lands in the top 18 but not the top 6 (eyeball ingest_runs +
+  manual /ask probes; no automated eval set yet). Don't push past 5
+  without measuring — the cross-encoder cost scales linearly.
+
+- **Disabling without a redeploy is not a thing.** Env vars are read
+  at module import, so flipping the flag requires a `helm upgrade`
+  (which rolls the rag pods). Emergency kill-switch: set
+  `reranker.url=""` (empty string) in the values file and upgrade —
+  `RERANKER_URL` becomes empty, the dispatcher short-circuits, /ask
+  returns un-reranked rows immediately. Cleaner than tearing down the
+  reranker endpoint itself if it is shared with other services.
+
+- **Seam reserved for tasks 13-14.** The rerank call sits in the
+  POST-retrieve / PRE-LLM region of `/ask`. Task 13 (query cache) and
+  task 14 (rate limiting) will both insert ABOVE the embedding call —
+  separate region, no collision with the reranker block.

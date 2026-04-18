@@ -145,6 +145,74 @@ def test_query_with_no_matches_returns_empty_citations(
     assert "couldn't find anything" in body["answer"].lower()
 
 
+def test_reranker_promotes_correct_file_for_noisy_query(
+    clean_db: str, ingest_module, rag_app, monkeypatch
+) -> None:
+    """A reranker that promotes the right chunk should beat raw retrieval.
+
+    Plan-12 acceptance: a noisy query (one whose words appear across many
+    files) should land the right file top-1 *after* the cross-encoder pass
+    even when it would not land top-1 from retrieval alone.
+
+    We can't depend on a real cross-encoder endpoint in CI, so we
+    monkeypatch ``reranker.rerank`` with a deterministic fake that scores
+    candidates by whether their content mentions the unique sentinel
+    marker for the eventbus fixture (``wallaby_pubsub_marker_77``). The
+    query itself uses the noisy phrase "subscribe and publish" — words
+    that show up in multiple fixture files (eventbus, calculator
+    docstring, README), so retrieval alone can plausibly rank a different
+    file top-1. The fake reranker steps in and surfaces eventbus.py.
+
+    What this proves end-to-end:
+    - The /ask handler actually calls the reranker when enabled.
+    - The reranker's reordering survives the conversion back into
+      retrieval rows and shows up in the response citations.
+    - top_k * RERANKER_MULT widening pulls eventbus.py into the
+      candidate pool even when retrieval would otherwise rank it lower
+      than top_k=3.
+    """
+    _seed(clean_db, ingest_module)
+
+    import reranker as reranker_mod
+
+    async def fake_rerank(query, candidates, *, url, model, **kw):
+        # Score 1.0 for the chunk that contains the unique eventbus
+        # sentinel; everything else gets 0.0. Stable sort within ties
+        # preserves the underlying retrieval order, so the assertion is
+        # tight: eventbus must be top-1 because the reranker said so.
+        scored = []
+        for c in candidates:
+            score = 1.0 if "wallaby_pubsub_marker_77" in c.get("content", "") else 0.0
+            scored.append((score, c))
+        scored.sort(key=lambda x: -x[0])
+        return [c for _s, c in scored]
+
+    monkeypatch.setattr(rag_app, "RERANKER_ENABLED", True)
+    monkeypatch.setattr(rag_app, "RERANKER_URL", "http://fake-reranker.local")
+    monkeypatch.setattr(rag_app, "RERANKER_MULT", 3)
+    monkeypatch.setattr(reranker_mod, "rerank", fake_rerank)
+
+    client = TestClient(rag_app.app)
+    resp = client.post("/ask", json={
+        # Noisy query — both eventbus.py and other fixture files use these
+        # general words. Without rerank, top-1 is not guaranteed to be
+        # eventbus.py.
+        "query": "how do I subscribe to and publish events on the bus",
+        "repo": "sentinel",
+        "top_k": 3,
+    })
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    paths = [c["path"] for c in body["citations"]]
+    assert paths, "expected at least one citation"
+    # The fake reranker promotes eventbus.py — assert top-1 explicitly so
+    # we know the rerank output flowed through (not just that the file
+    # happens to be in the top-k).
+    assert paths[0] == "src/eventbus.py", (
+        f"reranker should promote eventbus.py to top-1; got {paths}"
+    )
+
+
 def test_hybrid_search_finds_unique_identifier_via_bm25(
     clean_db: str, ingest_module, rag_app
 ) -> None:

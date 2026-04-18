@@ -13,3 +13,8 @@ prometheus-client>=0.20,<1
 # Imported lazily inside the _K8sDeps wrapper so unit tests that never hit
 # that endpoint can skip installing the client.
 kubernetes>=30,<32
+# httpx — used by `reranker.py` to POST to the cross-encoder reranker
+# endpoint. Already an indirect dep via openai/uvicorn/fastapi, pinned
+# here too so the runtime image always has the async client available
+# regardless of whether `RERANKER_ENABLED` is on.
+httpx>=0.27,<1

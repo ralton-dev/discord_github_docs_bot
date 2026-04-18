@@ -65,6 +65,17 @@ CHAT_LATENCY_SECONDS = Histogram(
     ("repo", "model"),
 )
 
+# Cross-encoder reranker (plan 12). The budget for a healthy bge-reranker
+# call on top_k=6 candidates (so 18 docs at the default candidatesMultiplier
+# of 3) is roughly 200ms-500ms p95 on a small GPU. Buckets cover both the
+# happy path and the "something is wrong" tail (multi-second latencies are
+# how a wedged backend manifests before timeouts trip).
+RERANK_LATENCY_SECONDS = Histogram(
+    "gitdoc_rerank_latency_seconds",
+    "Time spent in the cross-encoder reranker",
+    buckets=(0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0),
+)
+
 
 # --- Small helpers ----------------------------------------------------------
 

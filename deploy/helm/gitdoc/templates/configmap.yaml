@@ -17,6 +17,10 @@ data:
   RAG_ORCHESTRATOR_URL: "http://{{ include "gitdoc.fullname" . }}-rag:8000"
   GUILD_ALLOWLIST: {{ .Values.discordBot.guildAllowlist | quote }}
   HYBRID_SEARCH_ENABLED: "{{ .Values.search.hybrid.enabled }}"
+  RERANKER_ENABLED: "{{ .Values.reranker.enabled }}"
+  RERANKER_URL: {{ .Values.reranker.url | quote }}
+  RERANKER_MODEL: {{ .Values.reranker.model | quote }}
+  RERANKER_MULT: "{{ .Values.reranker.candidatesMultiplier }}"
 ---
 apiVersion: v1
 kind: ConfigMap

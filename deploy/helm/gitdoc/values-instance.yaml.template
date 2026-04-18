@@ -97,6 +97,20 @@ secrets:
 #     enabled: false
 
 # ---------------------------------------------------------------------------
+# Cross-encoder reranker (optional, see docs/retrieval.md "Reranker"). When
+# enabled, /ask fetches top_k * candidatesMultiplier candidates from
+# retrieval and reorders them via a cross-encoder before LLM context
+# building. Off by default — turn on once a reranker endpoint is reachable
+# from the cluster (typically the homelab Ollama with bge-reranker-v2-m3,
+# or a small adapter exposing LiteLLM's /v1/rerank shape).
+# ---------------------------------------------------------------------------
+# reranker:
+#   enabled: true
+#   url: "http://ollama.ollama.svc.cluster.local:11434/api/rerank"
+#   model: "BAAI/bge-reranker-v2-m3"
+#   candidatesMultiplier: 3
+
+# ---------------------------------------------------------------------------
 # Webhook-driven ingestion (optional, see docs/webhooks.md). When enabled,
 # the rag pod exposes POST /webhook and spawns an ingestion Job on every
 # verified push. The CronJob remains as a safety net.

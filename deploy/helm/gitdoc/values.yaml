@@ -116,6 +116,18 @@ search:
   hybrid:
     enabled: true
 
+# Cross-encoder reranker (plan 12). When enabled, /ask fetches
+# top_k * candidatesMultiplier rows from retrieval and reorders them with
+# a cross-encoder before sending the trimmed top_k to the LLM. Disabled by
+# default — flip on once a reranker endpoint is provisioned (typically the
+# homelab Ollama hosting BAAI/bge-reranker-v2-m3, or a small adapter that
+# translates LiteLLM's /v1/rerank shape; see docs/retrieval.md).
+reranker:
+  enabled: false
+  url: ""                                   # e.g. http://ollama.ollama.svc:11434/api/rerank
+  model: "BAAI/bge-reranker-v2-m3"
+  candidatesMultiplier: 3
+
 # Webhook-driven ingestion (plan 15). When enabled, the rag Deployment
 # exposes POST /webhook and spawns a Job from the ingestion CronJob on
 # every verified push. The CronJob stays as a safety net.
