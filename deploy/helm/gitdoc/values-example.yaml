@@ -1,5 +1,17 @@
 # Per-instance values file. Copy to values-<slug>.yaml and fill in.
 # Real secrets should come from sealed-secrets / external-secrets in production.
+#
+# Provisioning a new instance
+# ---------------------------
+# Before `helm install`, a one-time admin step creates the Postgres DB and
+# role this chart's db-migrate Job will use. See db/provision/README.md for
+# the full procedure:
+#   1. generate a strong password
+#   2. psql -v slug=<slug> -v password=<pw> -f db/provision/provision-instance.sql
+#   3. build the DSN postgresql://gitdoc_<slug>:<pw>@<host>:5432/gitdoc_<slug>?sslmode=require
+#   4. paste the DSN into secrets.postgresDsn below (or the external-secrets
+#      path once task 10 lands)
+#   5. verify with `\dx`, `\du gitdoc_<slug>`, `SELECT 1;` as the new role.
 
 repo:
   name: "project-a"
