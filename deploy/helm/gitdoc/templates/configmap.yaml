@@ -26,12 +26,21 @@ data:
   GUILD_TOKENS_PER_HOUR: "{{ .Values.rateLimits.guildTokensPerHour }}"
   USER_TOKENS_PER_HOUR: "{{ .Values.rateLimits.userTokensPerHour }}"
 ---
+# Consumed only by the `db-migrate` pre-install/pre-upgrade Job. Tagged as
+# a Helm hook with a more-negative weight than the Job (-10 < -5) so Helm
+# creates the ConfigMap before the Job tries to mount it. Without this
+# annotation the ConfigMap is a regular resource and is applied AFTER any
+# hook of the same phase, so the Job fails to start on a fresh install.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: {{ include "gitdoc.fullname" . }}-migrations
   labels:
     {{- include "gitdoc.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
 data:
   init.sql: |
     CREATE EXTENSION IF NOT EXISTS vector;
