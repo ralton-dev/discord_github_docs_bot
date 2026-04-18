@@ -1,10 +1,10 @@
+import base64
 import logging
 import os
 import pathlib
 import subprocess
 import tempfile
 import time
-from urllib.parse import urlparse, urlunparse
 
 import psycopg
 from langchain_text_splitters import Language, RecursiveCharacterTextSplitter
@@ -52,24 +52,68 @@ SKIP_DIRS = {".git", "node_modules", "dist", "build", "vendor",
 MAX_FILE_BYTES = 500_000
 
 
-def _auth_url(url: str, token: str) -> str:
-    if not token:
-        return url
-    u = urlparse(url)
-    if u.scheme not in ("http", "https"):
-        return url
-    return urlunparse(u._replace(netloc=f"x-access-token:{token}@{u.hostname}"
-                                 + (f":{u.port}" if u.port else "")))
+def _git_auth_env(base_env: "os._Environ | dict[str, str]", token: str) -> dict[str, str]:
+    """Build a subprocess env that authenticates git HTTPS WITHOUT putting
+    the token in argv, the URL, or anywhere git itself might echo.
+
+    Uses git's GIT_CONFIG_COUNT / GIT_CONFIG_KEY_<N> / GIT_CONFIG_VALUE_<N>
+    env-var pattern (git >= 2.31) to inject `http.extraheader:
+    Authorization: Basic <base64(x-access-token:TOKEN)>` for this
+    subprocess only. The header is attached to the HTTPS request to the
+    remote — git never logs headers, only URLs. Pair with a credential-free
+    URL passed to `git clone` so even git's fatal: error messages carry no
+    secret.
+
+    Returns a fresh dict so the caller's env isn't mutated.
+    """
+    env = dict(base_env)
+    if token:
+        auth = base64.b64encode(
+            f"x-access-token:{token}".encode("utf-8")
+        ).decode("ascii")
+        env["GIT_CONFIG_COUNT"] = "1"
+        env["GIT_CONFIG_KEY_0"] = "http.extraheader"
+        env["GIT_CONFIG_VALUE_0"] = f"Authorization: Basic {auth}"
+    return env
+
+
+def _scrub_token(text: str, token: str) -> str:
+    """Redact `token` from arbitrary text. Defence-in-depth: the
+    Authorization-header flow above keeps the token out of git's output
+    entirely, but if a future git version or plugin ever leaks it via
+    stderr, don't let that land in Loki / audit logs unredacted.
+    """
+    if not token or not text:
+        return text
+    return text.replace(token, "<redacted>")
 
 
 def clone(dest: pathlib.Path) -> str:
-    subprocess.run(
-        ["git", "clone", "--depth=1", "--branch", BRANCH,
-         _auth_url(REPO_URL, GIT_TOKEN), str(dest)],
-        check=True,
-    )
+    env = _git_auth_env(os.environ, GIT_TOKEN)
+    # --quiet suppresses normal progress noise; stderr is captured so we
+    # can scrub + log it ourselves on failure. The URL passed to git has
+    # NO credentials in it — the token rides in an out-of-band header.
+    try:
+        subprocess.run(
+            ["git", "clone", "--depth=1", "--quiet", "--branch", BRANCH,
+             REPO_URL, str(dest)],
+            check=True,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr = _scrub_token(exc.stderr or "", GIT_TOKEN)
+        # `from None` drops the original CalledProcessError from the
+        # traceback; its __repr__ includes argv, which future code could
+        # theoretically extend to embed a secret again.
+        raise RuntimeError(
+            f"git clone failed (exit {exc.returncode}): {stderr}"
+        ) from None
     return subprocess.check_output(
-        ["git", "-C", str(dest), "rev-parse", "HEAD"]
+        ["git", "-C", str(dest), "rev-parse", "HEAD"],
+        env=env,
     ).decode().strip()
 
 

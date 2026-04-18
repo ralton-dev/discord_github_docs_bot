@@ -16,45 +16,72 @@ import ingest
 
 
 # ---------------------------------------------------------------------------
-# _auth_url
+# _git_auth_env — token must ride in an Authorization header, NOT in the URL
 # ---------------------------------------------------------------------------
 
-class TestAuthUrl:
-    def test_empty_token_returns_url_unchanged(self) -> None:
-        url = "https://github.com/org/repo.git"
-        assert ingest._auth_url(url, "") == url
+class TestGitAuthEnv:
+    def test_empty_token_returns_env_unchanged(self) -> None:
+        base = {"PATH": "/usr/bin", "HOME": "/tmp"}
+        got = ingest._git_auth_env(base, "")
+        assert got == base
+        # No GIT_CONFIG_* keys get added when there's no token.
+        assert "GIT_CONFIG_COUNT" not in got
+        assert "GIT_CONFIG_KEY_0" not in got
+        assert "GIT_CONFIG_VALUE_0" not in got
 
-    def test_token_interpolated_into_https_url(self) -> None:
-        url = "https://github.com/org/repo.git"
-        token = "ghp_abc123"
-        got = ingest._auth_url(url, token)
-        assert got == f"https://x-access-token:{token}@github.com/org/repo.git"
+    def test_token_sets_extraheader_via_git_config_env(self) -> None:
+        base = {"PATH": "/usr/bin"}
+        got = ingest._git_auth_env(base, "ghp_abc123")
+        assert got["GIT_CONFIG_COUNT"] == "1"
+        assert got["GIT_CONFIG_KEY_0"] == "http.extraheader"
+        value = got["GIT_CONFIG_VALUE_0"]
+        assert value.startswith("Authorization: Basic ")
+        # Decode the base64 payload and check it round-trips to
+        # "x-access-token:<token>".
+        import base64 as _b64
 
-    def test_token_interpolated_into_http_url(self) -> None:
-        url = "http://git.internal/org/repo.git"
-        got = ingest._auth_url(url, "tok")
-        assert got == "http://x-access-token:tok@git.internal/org/repo.git"
+        encoded = value.removeprefix("Authorization: Basic ")
+        decoded = _b64.b64decode(encoded).decode("utf-8")
+        assert decoded == "x-access-token:ghp_abc123"
 
-    def test_non_http_scheme_passthrough(self) -> None:
-        # ssh / git+ssh / file etc. must not be mangled.
-        for url in (
-            "ssh://git@github.com/org/repo.git",
-            "git@github.com:org/repo.git",
-            "file:///tmp/repo",
-        ):
-            assert ingest._auth_url(url, "tok") == url
+    def test_base_env_is_not_mutated(self) -> None:
+        base = {"PATH": "/usr/bin"}
+        _ = ingest._git_auth_env(base, "tok")
+        # Returned env has the keys; caller's env does not.
+        assert "GIT_CONFIG_COUNT" not in base
 
-    def test_port_preserved_when_present(self) -> None:
-        url = "https://git.internal:8443/org/repo.git"
-        got = ingest._auth_url(url, "tok")
-        assert got == "https://x-access-token:tok@git.internal:8443/org/repo.git"
+    def test_token_does_not_appear_in_argv_or_url(self) -> None:
+        # Sentinel check: whatever _git_auth_env produces, the token value
+        # itself only ends up inside the base64-encoded header. Grep the
+        # rendered string form.
+        got = ingest._git_auth_env({}, "super-secret-token-xyz")
+        # The raw token must NOT appear as-is in any value.
+        for v in got.values():
+            assert "super-secret-token-xyz" not in v
 
-    def test_port_absent_when_absent_in_source(self) -> None:
-        url = "https://github.com/org/repo.git"
-        got = ingest._auth_url(url, "tok")
-        # No trailing ":None" or ":" before the @.
-        assert "x-access-token:tok@github.com/" in got
-        assert ":None@" not in got
+
+# ---------------------------------------------------------------------------
+# _scrub_token — belt-and-braces redaction of accidental token leakage
+# ---------------------------------------------------------------------------
+
+class TestScrubToken:
+    def test_empty_token_passthrough(self) -> None:
+        assert ingest._scrub_token("hello ghp_abc", "") == "hello ghp_abc"
+
+    def test_empty_text_passthrough(self) -> None:
+        assert ingest._scrub_token("", "ghp_abc") == ""
+
+    def test_token_substring_redacted(self) -> None:
+        text = "fatal: auth failed at https://x-access-token:ghp_abc@github.com/..."
+        assert ingest._scrub_token(text, "ghp_abc") == (
+            "fatal: auth failed at https://x-access-token:<redacted>@github.com/..."
+        )
+
+    def test_multiple_occurrences_all_redacted(self) -> None:
+        text = "tok=abc123 tok_again=abc123"
+        assert ingest._scrub_token(text, "abc123") == (
+            "tok=<redacted> tok_again=<redacted>"
+        )
 
 
 # ---------------------------------------------------------------------------
