@@ -248,6 +248,20 @@ def _invalidate_commit_cache(repo: str | None = None) -> None:
         _commit_cache.pop(repo, None)
 
 
+class HistoryTurn(BaseModel):
+    """A single turn in a prior conversation, forwarded by the bot when a
+    user replies inside an /ask thread. ``role`` is always "user" or
+    "assistant" — the system prompt is ours, not theirs.
+
+    Bounded length to stop a pathological thread from blowing past the
+    chat model's context window in a single request. The bot already
+    budgets at 3000 chars total across all turns, so the per-turn cap
+    is a secondary guardrail.
+    """
+    role: str = Field(pattern=r"^(user|assistant)$")
+    content: str = Field(min_length=1, max_length=4000)
+
+
 class AskRequest(BaseModel):
     query: str = Field(min_length=1, max_length=2000)
     repo: str  = Field(min_length=1)
@@ -258,6 +272,13 @@ class AskRequest(BaseModel):
     # always sends these on every /ask call.
     guild_id: str | None = Field(default=None)
     user_id: str | None = Field(default=None)
+    # Prior turns from the thread the bot is replying in (plan 16). The
+    # bot builds this from the last N messages in the Thread; see
+    # services/discord-bot/bot.py::_collect_thread_history. We cap the
+    # list size here to stop a runaway thread from pushing past the
+    # chat model's context window — 20 turns plus the current question
+    # is comfortably within any modern model's window.
+    history: list[HistoryTurn] | None = Field(default=None, max_length=20)
 
 
 class Citation(BaseModel):
@@ -663,6 +684,7 @@ def ask(req: AskRequest):
             "event": "ask.received",
             "repo": req.repo,
             "query_chars": len(req.query),
+            "history_turns": len(req.history) if req.history else 0,
         },
     )
     if model is None:
@@ -762,14 +784,33 @@ def ask(req: AskRequest):
             + f"\n\nQuestion: {req.query}"
         )
 
+        # Assemble the chat-completions `messages` list.
+        #
+        #   [system prompt,
+        #    ...prior turns of this thread (user / assistant alternating),
+        #    current user turn with the retrieved context appended]
+        #
+        # Retrieval is only attached to the CURRENT user turn — prior
+        # turns carried the context they needed at the time they were
+        # answered. Injecting old context into every turn would blow past
+        # the context window on a long thread; the bot also pre-compacts
+        # prior assistant turns (`_compact_citations` strips the Sources
+        # block to a one-liner) so we can afford to forward the full
+        # natural narrative rather than just the most-recent question.
+        chat_messages: list[dict[str, str]] = [
+            {"role": "system", "content": SYSTEM_PROMPT}
+        ]
+        if req.history:
+            chat_messages.extend(
+                {"role": t.role, "content": t.content} for t in req.history
+            )
+        chat_messages.append({"role": "user", "content": user_prompt})
+
         try:
             with metrics.timed(metrics.CHAT_LATENCY_SECONDS, req.repo, model):
                 completion = llm.chat.completions.create(
                     model=model,
-                    messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user",   "content": user_prompt},
-                    ],
+                    messages=chat_messages,
                     temperature=0.1,
                     max_tokens=1024,
                 )
