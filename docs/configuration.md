@@ -15,6 +15,7 @@ ones that can be changed without a redeploy.
 | Allow the bot in specific servers only | `discordBot.guildAllowlist` (comma-separated guild IDs) |
 | Change how often ingestion runs | `ingestion.schedule` (cron; default `0 */6 * * *`) |
 | Re-ingest every single commit | Enable webhooks: `webhook.enabled=true` + `secrets.webhookSecret` |
+| Force a full re-ingest on the same SHA | env `FORCE_REINGEST=true` on the next ingest Job (see Ingestion below) |
 | Give the bot longer to wait for slow LLMs | `discordBot.askTimeoutSecs` (default 180) |
 | Raise / lower token budgets | `rateLimits.guildTokensPerHour`, `rateLimits.userTokensPerHour` |
 | Disable answer caching (for perf benchmarking) | `queryCache.enabled=false` |
@@ -121,6 +122,26 @@ Cache hits count as 0 tokens — free answers don't eat budget. Over-budget requ
 | `ingestion.resources.*` | `200m/512Mi` req, `2/2Gi` limit | CPU-bound during chunking; the limit drives wall time. |
 | `dbMigrate.enabled` | `true` | Pre-install/upgrade Helm hook that applies `init.sql`. Don't disable unless you really know what you're doing. |
 | `dbMigrate.image` | `postgres:16-alpine` | Must match the Postgres major version of your DB. |
+
+**Scheduled runs are cheap when nothing changed.** After cloning, ingest
+checks `ingest_runs` for a successful row matching the current
+`commit_sha`. If the branch hasn't moved, it logs `ingest.skipped` and
+exits without embedding anything. So setting the cron to every 30 minutes
+doesn't 12× your embedding cost if the branch is quiet.
+
+**Force a full re-embed** by setting env `FORCE_REINGEST=true` on the
+next Job. Useful when you bump chunking rules or recover from a corrupt
+run. Example:
+
+```sh
+kubectl -n gitdoc-<slug> create job --from=cronjob/gitdoc-<slug>-ingest \
+  gitdoc-<slug>-force-$(date +%s) --dry-run=client -o yaml \
+  | yq '.spec.template.spec.containers[0].env += [{"name":"FORCE_REINGEST","value":"true"}]' \
+  | kubectl apply -f -
+```
+
+(Or just `kubectl exec` into a one-off pod with the env set. The env var
+is read once at process start.)
 
 ### What ingestion indexes
 

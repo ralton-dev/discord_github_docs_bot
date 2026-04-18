@@ -85,6 +85,54 @@ class TestScrubToken:
 
 
 # ---------------------------------------------------------------------------
+# _already_ingested — fast-exit when the branch SHA hasn't moved
+# ---------------------------------------------------------------------------
+
+
+class _StubCursor:
+    def __init__(self, row: tuple | None) -> None:
+        self._row = row
+
+    def fetchone(self) -> tuple | None:
+        return self._row
+
+
+class _StubConn:
+    """Minimal conn stub: `execute(...)` returns a preset row for fetchone()."""
+
+    def __init__(self, row: tuple | None) -> None:
+        self._row = row
+        self.queries: list[tuple[str, tuple]] = []
+
+    def execute(self, query: str, params: tuple = ()) -> _StubCursor:
+        self.queries.append((query, tuple(params)))
+        return _StubCursor(self._row)
+
+
+class TestAlreadyIngested:
+    def test_returns_true_when_ok_row_exists(self) -> None:
+        # A single matching row from the SELECT means the (repo, sha)
+        # combination has already been fully ingested.
+        conn = _StubConn(row=(1,))
+        assert ingest._already_ingested(conn, "myrepo", "abc123") is True
+
+    def test_returns_false_when_no_row(self) -> None:
+        conn = _StubConn(row=None)
+        assert ingest._already_ingested(conn, "myrepo", "abc123") is False
+
+    def test_query_filters_on_repo_sha_and_ok_status(self) -> None:
+        conn = _StubConn(row=None)
+        ingest._already_ingested(conn, "myrepo", "abc123")
+        query, params = conn.queries[0]
+        # Contract: the check MUST filter by status='ok'. A crashed run
+        # (status='running' or 'failed') should not block the retry.
+        assert "status = 'ok'" in query
+        assert "repo = %s" in query
+        assert "commit_sha = %s" in query
+        assert params == ("myrepo", "abc123")
+
+
+# ---------------------------------------------------------------------------
 # iter_chunks
 # ---------------------------------------------------------------------------
 

@@ -25,6 +25,13 @@ LITELLM_BASE = os.environ["LITELLM_BASE_URL"]
 LITELLM_KEY  = os.environ["LITELLM_API_KEY"]
 EMBED_MODEL  = os.environ.get("EMBED_MODEL", "text-embedding-3-small")
 BATCH_SIZE   = int(os.environ.get("EMBED_BATCH", "64"))
+# Skip the check and re-embed every chunk even when the SHA hasn't moved.
+# Use when bumping chunking rules, swapping embedding model (on a fresh
+# DB), or recovering from a broken run. The natural invariant is "no
+# work when the SHA is unchanged", so default is off.
+FORCE_REINGEST = os.environ.get("FORCE_REINGEST", "").lower() in (
+    "1", "true", "yes", "on",
+)
 
 llm = OpenAI(base_url=LITELLM_BASE, api_key=LITELLM_KEY)
 
@@ -151,6 +158,28 @@ def iter_chunks(root: pathlib.Path):
             yield rel, i, chunk, ctype, language
 
 
+def _already_ingested(conn, repo: str, sha: str) -> bool:
+    """Return True if a prior run for ``(repo, sha)`` completed successfully.
+
+    Used to short-circuit the scheduled CronJob when `repo.branch` hasn't
+    advanced since the last run — without this check, every tick clones
+    the repo, re-embeds every chunk (paying the full embedding-API cost),
+    and then watches ON CONFLICT DO NOTHING discard the rows because they
+    already exist for this SHA. Idempotent, but wasteful.
+
+    Only an ``ok`` status counts: a ``running``/``failed`` row from a
+    prior crash means the previous run didn't finish, and we want the
+    current run to re-try.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM ingest_runs "
+        "WHERE repo = %s AND commit_sha = %s AND status = 'ok' "
+        "LIMIT 1",
+        (repo, sha),
+    ).fetchone()
+    return row is not None
+
+
 def main() -> None:
     started = time.perf_counter()
     log.info(
@@ -176,6 +205,25 @@ def main() -> None:
 
         with psycopg.connect(PG_DSN, autocommit=True) as conn:
             register_vector(conn)
+
+            # Fast-exit when the branch hasn't moved since the last ok run.
+            # Cheap — one indexed lookup against ingest_runs — and saves
+            # an entire walk + embed + upsert cycle. Operator can bypass
+            # via FORCE_REINGEST=true (see README/docs/configuration.md).
+            if not FORCE_REINGEST and _already_ingested(conn, REPO_NAME, sha):
+                log.info(
+                    "ingest skipped — commit already fully ingested",
+                    extra={
+                        "event": "ingest.skipped",
+                        "repo": REPO_NAME,
+                        "sha": sha,
+                        "duration_ms": int(
+                            (time.perf_counter() - started) * 1000
+                        ),
+                    },
+                )
+                return
+
             run_id = conn.execute(
                 "INSERT INTO ingest_runs (repo, commit_sha) VALUES (%s,%s) RETURNING id",
                 (REPO_NAME, sha),
