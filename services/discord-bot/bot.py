@@ -151,9 +151,36 @@ async def _collect_thread_history(
     return raw
 
 
+class RateLimitedError(Exception):
+    """Raised by `_ask_orchestrator` when the orchestrator returns 429.
+
+    Carries the `retry_after` (seconds) and `reason` (`guild_budget` or
+    `user_budget`) from the orchestrator's JSON body so the command
+    handlers can render a friendly, ephemeral message to the user.
+    Distinct from a generic HTTP error so `/ask` and the thread
+    follow-up handler can catch it specifically and not lump it in with
+    "orchestrator is down" messaging.
+    """
+
+    def __init__(self, retry_after: int, reason: str) -> None:
+        super().__init__(f"rate limited ({reason}); retry in {retry_after}s")
+        self.retry_after = retry_after
+        self.reason = reason
+
+
+def _format_rate_limited_message(err: RateLimitedError) -> str:
+    """Canonical user-facing copy for a 429 from the orchestrator."""
+    return (
+        f"You're asking too fast. Retry in ~{err.retry_after} seconds.\n"
+        f"(Budget: {err.reason})"
+    )
+
+
 async def _ask_orchestrator(
     query: str,
     history: list[dict] | None = None,
+    guild_id: str | None = None,
+    user_id: str | None = None,
 ) -> dict:
     """POST to the RAG orchestrator's /ask endpoint.
 
@@ -162,17 +189,42 @@ async def _ask_orchestrator(
     if it returns 422 we log once and retry the call without `history`,
     so the bot degrades gracefully to single-turn behaviour.
 
+    `guild_id` / `user_id` identify the caller for the orchestrator's
+    rate-limit gate (plan 14). Forwarded as-is when present; omitted
+    when None so older orchestrators that don't know the fields stay
+    happy.
+
     Returns the parsed JSON dict (`{"answer": str, "citations": [...]}`).
-    Raises on transport/HTTP errors other than the documented 422 fallback.
+    Raises:
+    - `RateLimitedError` on HTTP 429 (caller should surface the
+      friendly retry message via `_format_rate_limited_message`).
+    - `httpx.HTTPStatusError` on any other 4xx/5xx after the documented
+      422+history fallback.
     """
     global _history_unsupported_logged
 
     body: dict = {"query": query, "repo": REPO}
     if history:
         body["history"] = history
+    if guild_id is not None:
+        body["guild_id"] = guild_id
+    if user_id is not None:
+        body["user_id"] = user_id
 
     async with httpx.AsyncClient(timeout=60) as h:
         r = await h.post(f"{RAG_URL}/ask", json=body)
+        # Rate limit first — we do NOT retry and we do NOT fall back to
+        # "no history". 429 is a positive signal from the orchestrator
+        # that the user should wait; converting it into a silent retry
+        # would defeat the whole point of the cap.
+        if r.status_code == 429:
+            try:
+                err_body = r.json()
+            except Exception:
+                err_body = {}
+            retry_after = int(err_body.get("retry_after") or 60)
+            reason = str(err_body.get("error") or "rate_limited")
+            raise RateLimitedError(retry_after=retry_after, reason=reason)
         if r.status_code == 422 and history:
             # Most likely cause: orchestrator hasn't shipped the history
             # field yet. Log once at INFO, then retry single-turn so the
@@ -183,10 +235,21 @@ async def _ask_orchestrator(
                     "falling back to single-turn (will not warn again)"
                 )
                 _history_unsupported_logged = True
-            r = await h.post(
-                f"{RAG_URL}/ask",
-                json={"query": query, "repo": REPO},
-            )
+            retry_body = {"query": query, "repo": REPO}
+            if guild_id is not None:
+                retry_body["guild_id"] = guild_id
+            if user_id is not None:
+                retry_body["user_id"] = user_id
+            r = await h.post(f"{RAG_URL}/ask", json=retry_body)
+            # A 429 on the retry still surfaces as RateLimitedError.
+            if r.status_code == 429:
+                try:
+                    err_body = r.json()
+                except Exception:
+                    err_body = {}
+                retry_after = int(err_body.get("retry_after") or 60)
+                reason = str(err_body.get("error") or "rate_limited")
+                raise RateLimitedError(retry_after=retry_after, reason=reason)
         r.raise_for_status()
         return r.json()
 
@@ -221,7 +284,29 @@ async def ask(
 
     await interaction.response.defer(thinking=True)
     try:
-        data = await _ask_orchestrator(query)
+        data = await _ask_orchestrator(
+            query,
+            guild_id=str(interaction.guild_id) if interaction.guild_id is not None else None,
+            user_id=str(interaction.user.id),
+        )
+    except RateLimitedError as rle:
+        log.info(
+            "rag rate limited",
+            extra={
+                "event": "bot.response",
+                "query_id": query_id,
+                "guild_id": interaction.guild_id,
+                "repo": REPO,
+                "response_chars": 0,
+                "outcome": "rate_limited",
+                "reason": rle.reason,
+                "retry_after": rle.retry_after,
+            },
+        )
+        await interaction.followup.send(
+            _format_rate_limited_message(rle), ephemeral=True,
+        )
+        return
     except Exception:
         log.exception(
             "rag call failed",
@@ -305,7 +390,31 @@ async def on_message(message: discord.Message) -> None:
 
     history = await _collect_thread_history(thread)
     try:
-        data = await _ask_orchestrator(message.content, history=history)
+        data = await _ask_orchestrator(
+            message.content,
+            history=history,
+            guild_id=str(message.guild.id) if message.guild else None,
+            user_id=str(message.author.id),
+        )
+    except RateLimitedError as rle:
+        log.info(
+            "rag rate limited for thread follow-up",
+            extra={
+                "event": "bot.response",
+                "query_id": query_id,
+                "guild_id": message.guild.id if message.guild else None,
+                "repo": REPO,
+                "response_chars": 0,
+                "outcome": "rate_limited",
+                "reason": rle.reason,
+                "retry_after": rle.retry_after,
+            },
+        )
+        await thread.send(
+            _format_rate_limited_message(rle),
+            silent=True,
+        )
+        return
     except Exception:
         log.exception(
             "rag call failed for thread follow-up",

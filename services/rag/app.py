@@ -57,6 +57,18 @@ RERANKER_MULT = int(os.environ.get("RERANKER_MULT", "3"))
 # benchmarking cold-cache latency or isolating a stale-answer bug).
 QUERY_CACHE_ENABLED = os.environ.get("QUERY_CACHE_ENABLED", "true").lower() == "true"
 
+# Rate limits & cost caps (plan 14). When enabled, every /ask request
+# carrying (guild_id, user_id) is gated at the TOP of the handler — BEFORE
+# the query cache — by summing `tokens` in `rate_limit_usage` for the last
+# hour. Over budget = 429. Requests without both guild_id and user_id
+# (e.g. curl probes, health-check tooling) bypass the gate unconditionally.
+# Cache hits record tokens=0 so cached answers don't count against the
+# budget; LLM completions record prompt + completion tokens from the
+# OpenAI response.
+RATE_LIMIT_ENABLED = os.environ.get("RATE_LIMIT_ENABLED", "true").lower() == "true"
+GUILD_TOKENS_PER_HOUR = int(os.environ.get("GUILD_TOKENS_PER_HOUR", "200000"))
+USER_TOKENS_PER_HOUR = int(os.environ.get("USER_TOKENS_PER_HOUR", "50000"))
+
 # Webhook settings. WEBHOOK_SECRET is optional at import time so the service
 # still runs on instances that leave webhooks disabled (webhook.enabled=false
 # in the chart); requests to /webhook will be rejected with 401 until it is
@@ -233,6 +245,12 @@ class AskRequest(BaseModel):
     query: str = Field(min_length=1, max_length=2000)
     repo: str  = Field(min_length=1)
     top_k: int = Field(default=6, ge=1, le=20)
+    # Rate-limit identity (plan 14). Optional so callers without a Discord
+    # identity (curl probes, health-check flows) can still use /ask; the
+    # rate-limit gate skips entirely when both are None. The Discord bot
+    # always sends these on every /ask call.
+    guild_id: str | None = Field(default=None)
+    user_id: str | None = Field(default=None)
 
 
 class Citation(BaseModel):
@@ -374,6 +392,138 @@ def _retrieve(repo: str, query_text: str, embedding: list[float], top_k: int):
     return _retrieve_vector(repo, embedding, top_k)
 
 
+# ---------------------------------------------------------------------------
+# Rate-limit helpers (plan 14).
+#
+# Sliding-window token budgets enforced via SUM over rate_limit_usage
+# rows younger than 1 hour. Two independent caps: per-guild and per-user.
+# Any request exceeding either cap is rejected with 429. The gate runs
+# at the TOP of /ask — BEFORE the query-cache lookup — so a rate-limited
+# request cannot consume a cache hit.
+#
+# Graceful degrade: any DB error during the check is logged and treated
+# as "allowed". A flaky DB should not take down /ask because of a
+# rate-limit bug.
+# ---------------------------------------------------------------------------
+
+
+def _rate_limit_check(
+    guild_id: str | None, user_id: str | None,
+) -> tuple[bool, str | None, int]:
+    """Return ``(allowed, reason, retry_after_secs)``.
+
+    ``reason`` is one of ``None``, ``"guild_budget"``, ``"user_budget"``.
+    ``retry_after_secs`` is the number of seconds until the oldest row
+    currently in the 1-hour window ages out — the earliest point at
+    which the bucket can plausibly drain below the cap. It is clamped to
+    ``>= 1`` so clients never see a literal ``retry_after: 0``.
+
+    Skips entirely when both identifiers are None (non-Discord caller).
+    Guild cap is checked before user cap; whichever trips first wins —
+    the caller gets a single reason label and we don't double-count.
+    """
+    # Non-Discord caller (curl probe, health-check flow) — skip the gate.
+    if guild_id is None and user_id is None:
+        return (True, None, 0)
+    try:
+        with psycopg.connect(PG_DSN, connect_timeout=3, autocommit=True) as conn:
+            if guild_id is not None:
+                row = conn.execute(
+                    """
+                    SELECT COALESCE(SUM(tokens), 0)
+                    FROM rate_limit_usage
+                    WHERE guild_id = %s
+                      AND window_at > now() - interval '1 hour'
+                    """,
+                    (guild_id,),
+                ).fetchone()
+                guild_used = int(row[0]) if row else 0
+                if guild_used >= GUILD_TOKENS_PER_HOUR:
+                    return (
+                        False,
+                        "guild_budget",
+                        _retry_after_secs(conn, "guild_id", guild_id),
+                    )
+            if user_id is not None:
+                row = conn.execute(
+                    """
+                    SELECT COALESCE(SUM(tokens), 0)
+                    FROM rate_limit_usage
+                    WHERE user_id = %s
+                      AND window_at > now() - interval '1 hour'
+                    """,
+                    (user_id,),
+                ).fetchone()
+                user_used = int(row[0]) if row else 0
+                if user_used >= USER_TOKENS_PER_HOUR:
+                    return (
+                        False,
+                        "user_budget",
+                        _retry_after_secs(conn, "user_id", user_id),
+                    )
+    except Exception:
+        log.exception("rate_limit_check failed; allowing request (graceful degrade)")
+        return (True, None, 0)
+    return (True, None, 0)
+
+
+def _retry_after_secs(conn, column: str, value: str) -> int:
+    """Seconds until the oldest in-window row for ``column=value`` ages out.
+
+    SELECTs ``MIN(window_at)`` for the bucket; returns
+    ``max(1, 3600 - (now - min_window_at))``. On any error or empty
+    bucket (shouldn't happen because we only call this after finding
+    over-budget usage), falls back to 60s so clients have a sane retry.
+    """
+    try:
+        sql = (
+            f"SELECT EXTRACT(EPOCH FROM (now() - MIN(window_at))) "
+            f"FROM rate_limit_usage "
+            f"WHERE {column} = %s "
+            f"  AND window_at > now() - interval '1 hour'"
+        )
+        row = conn.execute(sql, (value,)).fetchone()
+        if not row or row[0] is None:
+            return 60
+        age = float(row[0])
+        return max(1, int(3600 - age))
+    except Exception:
+        log.exception("retry_after lookup failed; defaulting to 60s")
+        return 60
+
+
+def _record_rate_limit_usage(
+    guild_id: str | None,
+    user_id: str | None,
+    repo: str,
+    tokens: int,
+) -> None:
+    """Insert one row recording `tokens` spent by (guild_id, user_id, repo).
+
+    Skipped when both ids are None (non-Discord caller — we never
+    gate those and therefore never need to account them either). Empty
+    strings are coerced for the NOT NULL columns so a partial identity
+    (guild but no user, or vice versa) still accounts correctly.
+
+    DB errors are swallowed so a wedged Postgres cannot poison a
+    successful /ask — we'd rather serve the answer and miss one usage
+    row than 500 the user after they've already paid for the tokens.
+    """
+    if guild_id is None and user_id is None:
+        return
+    try:
+        with psycopg.connect(PG_DSN, connect_timeout=3, autocommit=True) as conn:
+            conn.execute(
+                """
+                INSERT INTO rate_limit_usage (guild_id, user_id, repo, tokens)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (guild_id or "", user_id or "", repo, int(tokens)),
+            )
+    except Exception:
+        log.exception("rate_limit_usage insert failed; usage not recorded")
+
+
 @app.post("/ask", response_model=AskResponse)
 def ask(req: AskRequest):
     start = time.perf_counter()
@@ -384,11 +534,39 @@ def ask(req: AskRequest):
     cache_commit_sha: str | None = None
     qhash: str | None = None
     # ------------------------------------------------------------------
-    # Pre-retrieval gates — keep this region short. Task 14 (rate
-    # limiting) will insert ABOVE the query-cache block: a rate-limited
-    # request must not consume a cache hit either, so the gate has to
-    # come first. Anything below this point is the slow path.
+    # Pre-retrieval gates — keep this region short. Rate limiting sits
+    # ABOVE the query cache: a rate-limited request must not consume a
+    # cache hit either, so the gate comes first. Anything below this
+    # point is the slow path.
     # ------------------------------------------------------------------
+    # Rate limiting (plan 14). Applies only when the caller sent a
+    # (guild_id, user_id). Non-Discord callers (curl probes) bypass.
+    if RATE_LIMIT_ENABLED:
+        allowed, reason, retry_after = _rate_limit_check(req.guild_id, req.user_id)
+        if not allowed:
+            metrics.RATE_LIMIT_HITS_TOTAL.labels(req.repo, reason or "unknown").inc()
+            log.info(
+                "ask rate limited",
+                extra={
+                    "event": "ask.rate_limited",
+                    "repo": req.repo,
+                    "reason": reason,
+                    "retry_after": retry_after,
+                    "guild_id": req.guild_id,
+                    "user_id": req.user_id,
+                },
+            )
+            # Record the 429 outcome so the standard /ask metrics stay
+            # coherent (total = ok + empty + error + cache_hit +
+            # rate_limited). Status "rate_limited" is a new label value
+            # — Prometheus handles this automatically.
+            elapsed = time.perf_counter() - start
+            metrics.LATENCY_SECONDS.labels("ask").observe(elapsed)
+            metrics.QUERIES_TOTAL.labels(req.repo, "rate_limited").inc()
+            return JSONResponse(
+                status_code=429,
+                content={"error": reason, "retry_after": retry_after},
+            )
     # Query cache (plan 13). Compute the hash once so both the lookup
     # and the later INSERT share the same value. `_latest_commit_sha`
     # returns None before the first successful ingestion — in that case
@@ -449,6 +627,15 @@ def ask(req: AskRequest):
                     elapsed = time.perf_counter() - start
                     metrics.LATENCY_SECONDS.labels("ask").observe(elapsed)
                     metrics.QUERIES_TOTAL.labels(req.repo, status).inc()
+                    # Cache hit costs the user zero tokens against
+                    # their budget. The row still exists so "how many
+                    # times has this guild asked?" stays meaningful if
+                    # we ever want a request-count cap in addition to
+                    # a token cap.
+                    if RATE_LIMIT_ENABLED:
+                        _record_rate_limit_usage(
+                            req.guild_id, req.user_id, req.repo, 0,
+                        )
                     return AskResponse(answer=answer_text, citations=citations)
                 except Exception:
                     # Corrupt cache row — log and fall through to the
@@ -605,6 +792,18 @@ def ask(req: AskRequest):
                 log.exception(
                     "query_cache insert failed; answer still returned"
                 )
+
+        # Rate-limit accounting (plan 14). Record actual token usage
+        # against the (guild, user) pair so the next hour's budget
+        # check reflects this call. No-op when the feature is off or
+        # the caller didn't send a Discord identity.
+        if RATE_LIMIT_ENABLED:
+            _record_rate_limit_usage(
+                req.guild_id,
+                req.user_id,
+                req.repo,
+                int(prompt_tokens) + int(completion_tokens),
+            )
 
         return AskResponse(answer=answer_text, citations=citations)
     finally:

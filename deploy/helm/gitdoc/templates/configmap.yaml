@@ -22,6 +22,9 @@ data:
   RERANKER_MODEL: {{ .Values.reranker.model | quote }}
   RERANKER_MULT: "{{ .Values.reranker.candidatesMultiplier }}"
   QUERY_CACHE_ENABLED: "{{ .Values.queryCache.enabled }}"
+  RATE_LIMIT_ENABLED: "{{ .Values.rateLimits.enabled }}"
+  GUILD_TOKENS_PER_HOUR: "{{ .Values.rateLimits.guildTokensPerHour }}"
+  USER_TOKENS_PER_HOUR: "{{ .Values.rateLimits.userTokensPerHour }}"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -85,3 +88,19 @@ data:
     );
     CREATE INDEX IF NOT EXISTS query_cache_repo_created_idx
         ON query_cache (repo, created_at DESC);
+
+    -- Rate-limit usage (plan 14). Per-guild and per-user hourly token
+    -- budgets are enforced by SUM(tokens) WHERE window_at > now() -
+    -- interval '1 hour'. See docs/rate-limits.md.
+    CREATE TABLE IF NOT EXISTS rate_limit_usage (
+        id          BIGSERIAL PRIMARY KEY,
+        guild_id    TEXT NOT NULL,
+        user_id     TEXT NOT NULL,
+        repo        TEXT NOT NULL,
+        tokens      INT NOT NULL,
+        window_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS rate_limit_usage_guild_window_idx
+        ON rate_limit_usage (guild_id, window_at DESC);
+    CREATE INDEX IF NOT EXISTS rate_limit_usage_user_window_idx
+        ON rate_limit_usage (user_id, window_at DESC);

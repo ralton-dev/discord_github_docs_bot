@@ -191,7 +191,9 @@ def clean_db(pg_dsn: str) -> Iterator[str]:
     Yields the DSN so tests can easily open their own connections.
     """
     with psycopg.connect(pg_dsn, autocommit=True) as conn:
-        conn.execute("TRUNCATE chunks, ingest_runs RESTART IDENTITY")
+        conn.execute(
+            "TRUNCATE chunks, ingest_runs, rate_limit_usage RESTART IDENTITY"
+        )
     yield pg_dsn
 
 

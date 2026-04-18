@@ -130,6 +130,19 @@ secrets:
 #   enabled: false
 
 # ---------------------------------------------------------------------------
+# Rate limits (optional, see docs/rate-limits.md). Per-guild and
+# per-user hourly token budgets. On by default with the chart defaults
+# (200k guild / 50k user per hour). Tune per-instance if a guild legitimately
+# burns more than the default, or lower if a project pays per-token and
+# wants a tighter cap. Disable to run uncapped — not recommended in a
+# multi-user Discord where one user could burn the token budget overnight.
+# ---------------------------------------------------------------------------
+# rateLimits:
+#   enabled: true
+#   guildTokensPerHour: 200000
+#   userTokensPerHour:  50000
+
+# ---------------------------------------------------------------------------
 # Discord — guildAllowlist gates the /ask command. Empty = allow every guild
 # the bot is invited to. For a homelab single-server setup, lock it down to
 # the one guild ID.

@@ -315,3 +315,64 @@ def test_hybrid_search_finds_unique_identifier_via_bm25(
     assert paths[0] == "src/calculator.py", (
         f"expected src/calculator.py ranked top-1; got {paths}"
     )
+
+
+def test_rate_limit_returns_429_over_budget(
+    clean_db: str, ingest_module, rag_app
+) -> None:
+    """Plan-14 acceptance: pre-seeded over-budget usage trips 429.
+
+    Strategy: insert enough ``rate_limit_usage`` rows within the
+    sliding 1-hour window to push the guild's total past
+    ``GUILD_TOKENS_PER_HOUR``, then call /ask with that guild_id. The
+    handler must respond 429 with ``{"error": "guild_budget",
+    "retry_after": <positive>}`` and must NOT touch the chat backend.
+    The seeded row's `window_at = now() - 5 minutes` so the expected
+    retry_after is in the 3000-3600 band — we assert a wide range so
+    wall-clock drift on CI doesn't flake.
+    """
+    _seed(clean_db, ingest_module)
+
+    # Pre-seed: one big usage row, 5 minutes old, for a specific guild.
+    guild_id = "rl-int-guild"
+    user_id = "rl-int-user"
+    over = rag_app.GUILD_TOKENS_PER_HOUR + 1
+    with psycopg.connect(clean_db, autocommit=True) as conn:
+        conn.execute(
+            """
+            INSERT INTO rate_limit_usage
+                (guild_id, user_id, repo, tokens, window_at)
+            VALUES (%s, %s, %s, %s, now() - interval '5 minutes')
+            """,
+            (guild_id, user_id, "sentinel", over),
+        )
+
+    client = TestClient(rag_app.app)
+    resp = client.post(
+        "/ask",
+        json={
+            "query": "anything at all",
+            "repo": "sentinel",
+            "guild_id": guild_id,
+            "user_id": user_id,
+        },
+    )
+    assert resp.status_code == 429, resp.text
+    body = resp.json()
+    assert body["error"] == "guild_budget"
+    # 5 minutes = 300s elapsed; retry_after ≈ 3600 - 300 = 3300. Allow a
+    # generous window so CI wall-clock noise doesn't flake.
+    assert 3000 <= int(body["retry_after"]) <= 3600, body
+
+    # Under-budget request with a different guild_id and user_id must
+    # still go through — proves the gate is scoped, not global.
+    resp_ok = client.post(
+        "/ask",
+        json={
+            "query": "what does the add function compute",
+            "repo": "sentinel",
+            "guild_id": "other-guild",
+            "user_id": "other-user",
+        },
+    )
+    assert resp_ok.status_code == 200, resp_ok.text

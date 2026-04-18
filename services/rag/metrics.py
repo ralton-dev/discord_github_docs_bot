@@ -52,6 +52,17 @@ CACHE_MISSES_TOTAL = Counter(
     ("repo",),
 )
 
+# Rate-limit hits (plan 14). Incremented every time /ask rejects a request
+# because its (guild_id or user_id) token budget is exhausted. `reason` is
+# `guild_budget` or `user_budget` so the homelab Prometheus can split
+# dashboards into "is one guild hot?" vs "is one user hammering?". No
+# latency / error metric — 429 is a fast path.
+RATE_LIMIT_HITS_TOTAL = Counter(
+    "gitdoc_rate_limit_hits_total",
+    "Requests rejected because they exceeded a token budget",
+    ("repo", "reason"),  # reason: "guild_budget" | "user_budget"
+)
+
 # --- Histograms -------------------------------------------------------------
 
 # Retrieval returns between 0 and top_k rows (top_k<=20). Buckets picked to

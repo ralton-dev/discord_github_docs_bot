@@ -2,8 +2,9 @@
 
 How the rag orchestrator picks the chunks it shows the chat model. Today
 this covers **hybrid search** (plan 11), the **cross-encoder reranker**
-(plan 12), and the **query cache** (plan 13). Rate-limiting (plan 14) is
-the next wave-5 item and will land here as it ships.
+(plan 12), the **query cache** (plan 13), and **rate limits** (plan 14).
+Rate limiting sits at the top of `/ask` — before the cache — so a
+rate-limited request doesn't consume a cache hit either.
 
 ## Hybrid search
 
@@ -354,3 +355,146 @@ roll (which `helm upgrade` triggers automatically). Use this when:
   ORDER BY hits DESC
   LIMIT 20;
   ```
+
+## Rate limits & cost caps
+
+`GUILD_ALLOWLIST` is a blunt on/off gate — a guild is either allowed to
+talk to the bot or it isn't. Rate limiting is the **budget** on top of
+that: even an allowed guild can't burn through 10k queries overnight.
+Two independent token caps are enforced on every `/ask` that carries a
+Discord identity:
+
+- **Per-guild**: `GUILD_TOKENS_PER_HOUR` — total tokens across all
+  users in a single guild over a rolling 1-hour window. Default 200k.
+- **Per-user**: `USER_TOKENS_PER_HOUR` — total tokens from one user
+  across every guild they're in. Default 50k.
+
+When either cap is exceeded the orchestrator returns HTTP 429 with:
+
+```json
+{ "error": "guild_budget" | "user_budget", "retry_after": <secs> }
+```
+
+`retry_after` is the number of seconds until the oldest in-window row
+ages out — the earliest point at which the bucket can plausibly drain
+below the cap. The Discord bot catches 429 specifically (separately
+from "backend down") and posts an ephemeral friendly message:
+
+```
+You're asking too fast. Retry in ~<N> seconds.
+(Budget: <reason>)
+```
+
+Caps live in `.Values.rateLimits` so operators can tune per-instance
+without touching code.
+
+### Precedence: guild first, then user
+
+Guild cap is checked before user cap. Whichever trips first wins — the
+caller gets exactly one `reason` label. If both buckets are over on the
+same call, we report `guild_budget`. That's deliberate: a guild-wide
+problem is more actionable ("who's the heaviest user in this guild?")
+than a per-user one.
+
+### What counts as "tokens"
+
+On the happy path, `prompt_tokens + completion_tokens` from the
+OpenAI-compatible chat response. Ollama routes through LiteLLM often
+return `0/0` for usage — in that case the call is accounted as 0
+tokens, which underreports actual spend. If a homelab instance really
+runs exclusively on Ollama the rate limits become an effective
+request-count cap via the row-count per (guild, user) not the token
+sum; raise the caps accordingly or add a request-count cap if this
+matters.
+
+**Cache hits are free.** A `status="cache_hit"` /ask records one
+`rate_limit_usage` row with `tokens=0` — the row exists so request-
+count analytics stay coherent, but the budget math ignores it.
+
+**Empty-retrieval answers** (`"I couldn't find anything relevant..."`)
+also don't charge a token budget — the chat call never ran.
+
+### Non-Discord callers bypass the gate
+
+When both `guild_id` and `user_id` are absent from the /ask body the
+gate is skipped entirely. Used by:
+
+- curl probes from inside the cluster (debugging, smoke tests).
+- health-check flows that hit /ask as a deep readiness check.
+
+This is intentional: rate limiting protects against runaway *users*, not
+against the operator. If an external tool should be rate-limited, add
+synthetic `guild_id="ext-<tool>"` + `user_id="ext-<tool>"` to its
+requests — the cap applies to any identity tuple, Discord or not.
+
+### Metrics
+
+One counter on the default Prometheus registry:
+
+- `gitdoc_rate_limit_hits_total{repo=..., reason=...}`
+  - `reason`: `guild_budget` | `user_budget`
+
+429'd requests also show up in `gitdoc_queries_total` with
+`status="rate_limited"` so dashboards can distinguish "rejected for
+budget" from "failed for technical reason".
+
+**PromQL for "which guild is hitting the cap?"**:
+
+```promql
+sum by (repo) (
+  increase(gitdoc_rate_limit_hits_total{reason="guild_budget"}[1h])
+)
+```
+
+A steady-state >0 on any repo means either the cap is too tight for
+legitimate use (bump it) or a single user is exhausting the guild
+budget (look at `reason="user_budget"` on the same repo — if it's
+also >0, same user is probably responsible for both).
+
+### Tuning
+
+- **`guildTokensPerHour = 200000`** -> ballpark 100-200 generous queries
+  per hour depending on answer length. FAQ-heavy channels should
+  comfortably stay below this; high-volume RAG usage may need 500k.
+- **`userTokensPerHour = 50000`** -> ballpark 25-50 generous queries per
+  hour per user. Low enough that one enthusiastic user can't burn the
+  guild cap alone.
+- Set either to an absurdly high number (e.g. `10000000`) to
+  effectively disable that bucket without disabling the feature as a
+  whole.
+- Set `rateLimits.enabled: false` to disable accounting + enforcement
+  entirely — keeps the DB table around for inspection but never writes
+  to it.
+
+### Invalidation / cleanup
+
+Rows age out naturally: the SUM query filters on
+`window_at > now() - interval '1 hour'`, so anything older is ignored
+even if it's still in the table. No TTL or eviction job is required at
+homelab scale. If the table grows inconveniently large, a daily cron
+`DELETE FROM rate_limit_usage WHERE window_at < now() - interval '1 day'`
+is enough — keep 24h for diagnostics, drop the rest.
+
+### Graceful degrade
+
+Every DB touch in the rate-limit path is wrapped in try/except:
+
+- Check failure -> "allowed". /ask proceeds. A wedged Postgres should
+  not 429 the user because of a rate-limit bug.
+- Record failure -> swallowed. The answer is already generated; missing
+  one usage row is preferable to 500-ing after a billable call.
+
+Watch for `rate_limit_check failed` / `rate_limit_usage insert failed`
+log events if you see the caps behaving weirdly.
+
+### Disabling
+
+Set `rateLimits.enabled: false` in the per-instance values file, then
+`helm upgrade --install`. Env vars are read at import time so the pod
+roll is the flag-flip. Kill-switch pattern:
+
+```yaml
+# values-<slug>.yaml
+rateLimits:
+  enabled: false
+```

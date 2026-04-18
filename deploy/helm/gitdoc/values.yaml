@@ -144,6 +144,18 @@ webhook:
 queryCache:
   enabled: true
 
+# Rate limits & cost caps (plan 14). Every /ask call from the Discord
+# bot carries guild_id + user_id; the orchestrator sums `tokens` in the
+# `rate_limit_usage` table over the last hour and rejects requests above
+# the configured cap with HTTP 429. Cache hits are recorded with
+# tokens=0 so cached answers don't count against the budget. Disable for
+# unauthenticated probes (curl to /ask without guild/user ids skips the
+# gate unconditionally). See docs/rate-limits.md.
+rateLimits:
+  enabled: true
+  guildTokensPerHour: 200000
+  userTokensPerHour:  50000
+
 # Observability (plan 09). The rag Service exposes /metrics in Prometheus
 # text format unconditionally; this block controls whether a ServiceMonitor
 # custom resource is rendered so the Prometheus Operator picks it up. Leave

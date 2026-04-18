@@ -586,3 +586,121 @@ Release workflow notes:
   still a request, still costs wall-clock and concurrency). The
   region at the TOP of `/ask` stays clean — task 14 slots in above
   `_query_hash`, no collision with cache logic.
+
+---
+
+## Appendix: Drafted from task 14
+
+> Captured while wiring rate limiting (`rate_limit_usage` table +
+> `RATE_LIMIT_HITS_TOTAL` counter + chart values + bot-side
+> `RateLimitedError`) into `services/rag/app.py` and
+> `services/discord-bot/bot.py`. When task 05 writes the full runbook,
+> fold this into the "Daily ops" and "Debugging" sections. Full
+> reference lives in `docs/retrieval.md` "Rate limits & cost caps"; the
+> runbook only needs the operator one-liners below.
+
+- **The caps are ON by default.** No action required on existing
+  instances after `helm upgrade --install` — the migration Job creates
+  `rate_limit_usage`, the chart injects the three env vars
+  (`RATE_LIMIT_ENABLED=true`, `GUILD_TOKENS_PER_HOUR=200000`,
+  `USER_TOKENS_PER_HOUR=50000`). No caller changes needed: the bot
+  always sends `guild_id` + `user_id` on `/ask`; non-Discord callers
+  (curl probes) bypass the gate entirely.
+
+- **Tuning the caps without a code change.** Put this in the per-
+  instance values file, then `helm upgrade --install`:
+  ```yaml
+  rateLimits:
+    enabled: true
+    guildTokensPerHour: 500000
+    userTokensPerHour:  100000
+  ```
+  Rolls the rag pods (env vars are read at import time). Effect is
+  immediate after the roll.
+
+- **Who's hitting the cap right now?** One-liner operator query:
+  ```sql
+  SELECT guild_id,
+         user_id,
+         SUM(tokens) AS tokens_last_hour,
+         COUNT(*)    AS request_count
+  FROM rate_limit_usage
+  WHERE window_at > now() - interval '1 hour'
+  GROUP BY guild_id, user_id
+  ORDER BY tokens_last_hour DESC
+  LIMIT 20;
+  ```
+  Useful when `gitdoc_rate_limit_hits_total` starts climbing. Pairs
+  with the PromQL:
+  ```promql
+  sum by (repo, reason) (
+    increase(gitdoc_rate_limit_hits_total[1h])
+  )
+  ```
+
+- **Forcibly unblocking a user.** If someone needs to be reset mid-
+  hour (legitimate heavy use, a demo, etc):
+  ```sql
+  DELETE FROM rate_limit_usage
+  WHERE user_id = '<discord_snowflake>'
+    AND window_at > now() - interval '1 hour';
+  ```
+  Same for `guild_id`. Future requests go through immediately — no
+  pod roll needed, the orchestrator re-queries the table on every
+  /ask.
+
+- **Kill-switch (disable all enforcement).** `rateLimits.enabled:
+  false` in values + `helm upgrade --install`. Rows stop being
+  written and the check is skipped. Leave the table around — it's a
+  diagnostic asset even when the gate isn't enforcing.
+
+- **Graceful degrade.** DB errors during the check are logged and
+  treated as "allowed"; /ask proceeds. Look for
+  `rate_limit_check failed` / `rate_limit_usage insert failed` log
+  events if caps behave weirdly:
+  ```sh
+  kubectl -n gitdoc-<slug> logs deploy/gitdoc-<slug>-rag --tail=500 \
+    | jq -c 'select(.event == "ask.rate_limited" or
+                    (.message | test("rate_limit_")))'
+  ```
+
+- **Table size & cleanup.** Rows age out of the SUM query naturally
+  (filtered by `window_at > now() - interval '1 hour'`). No TTL job
+  is required at homelab scale. If the table grows beyond comfort,
+  run a nightly:
+  ```sql
+  DELETE FROM rate_limit_usage WHERE window_at < now() - interval '1 day';
+  ```
+  The indexes on `(guild_id, window_at DESC)` and
+  `(user_id, window_at DESC)` keep the SUM queries indexed regardless
+  of table size.
+
+- **"Why did my bot say 'you're asking too fast'?"** Troubleshooting
+  tree in order:
+  1. Check the metric: `kubectl port-forward svc/...-rag 8000:8000`
+     then `curl -s localhost:8000/metrics | grep rate_limit_hits`.
+     Increasing = the cap is firing.
+  2. Run the "who's hitting the cap" SQL above — find the offending
+     `(guild_id, user_id)`.
+  3. Decide: raise the cap (values file + `helm upgrade`), or
+     `DELETE FROM rate_limit_usage WHERE user_id=...` for a
+     legitimate one-off reset.
+  4. If no matching rows exist, the cap is being triggered by a bug
+     (DB error paths say "allowed"; there should be no way to hit 429
+     without a usage row that totals over cap). Check the rag logs
+     for `ask.rate_limited` events — the log line includes the reason
+     and the ids that tripped.
+
+- **Ollama token-accounting caveat.** Ollama-through-LiteLLM often
+  returns `prompt_tokens=0, completion_tokens=0`. On a pure-Ollama
+  instance this means the token-cap is effectively a no-op — rows
+  still accumulate but with `tokens=0`. Either bump
+  `rateLimits.guildTokensPerHour` very low (e.g. `100`) so the
+  row-count-based effect kicks in, or skip rate limits entirely on
+  that instance and rely on the guild allowlist for protection.
+
+- **Wave 5 is COMPLETE.** Tasks 11 (hybrid) + 12 (reranker) + 13
+  (query cache) + 14 (rate limits) all shipped. `/ask` now has
+  retrieval widening, cross-encoder filtering, repeat-question
+  short-circuit, and per-(guild,user) token budgets. The RAG path is
+  feature-complete for phase 3.

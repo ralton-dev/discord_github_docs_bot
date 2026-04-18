@@ -73,3 +73,24 @@ CREATE TABLE IF NOT EXISTS query_cache (
 );
 CREATE INDEX IF NOT EXISTS query_cache_repo_created_idx
     ON query_cache (repo, created_at DESC);
+
+-- Rate-limit usage (plan 14). One row per successful /ask request that
+-- carried a guild_id and/or user_id. The sliding-window check sums
+-- `tokens` over rows younger than 1 hour for the relevant guild_id /
+-- user_id; cache hits record tokens=0 so cached answers are free.
+-- No eviction is wired here: the indexes make the `window_at > now() -
+-- interval '1 hour'` filter cheap, and rows outside the window are
+-- effectively ignored. A janitor DELETE every day is fine if the table
+-- grows beyond comfort.
+CREATE TABLE IF NOT EXISTS rate_limit_usage (
+    id          BIGSERIAL PRIMARY KEY,
+    guild_id    TEXT NOT NULL,
+    user_id     TEXT NOT NULL,
+    repo        TEXT NOT NULL,
+    tokens      INT NOT NULL,
+    window_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS rate_limit_usage_guild_window_idx
+    ON rate_limit_usage (guild_id, window_at DESC);
+CREATE INDEX IF NOT EXISTS rate_limit_usage_user_window_idx
+    ON rate_limit_usage (user_id, window_at DESC);
