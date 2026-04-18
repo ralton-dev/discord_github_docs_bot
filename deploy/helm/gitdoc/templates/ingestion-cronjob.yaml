@@ -20,6 +20,13 @@ spec:
             app.kubernetes.io/component: ingestion
         spec:
           restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            fsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
           containers:
             - name: ingest
               image: "{{ .Values.images.ingestion.repository }}:{{ .Values.images.ingestion.tag }}"
@@ -29,13 +36,22 @@ spec:
                     name: {{ include "gitdoc.fullname" . }}-config
                 - secretRef:
                     name: {{ include "gitdoc.fullname" . }}-secrets
+              # HOME under the read-only rootfs would block `git clone` from
+              # writing transient state (~/.gitconfig, ~/.cache/git). Point it
+              # at a writable emptyDir.
+              env:
+                - name: HOME
+                  value: /home/app
               volumeMounts:
                 - name: scratch
                   mountPath: /tmp
+                - name: home
+                  mountPath: /home/app
               resources:
                 {{- toYaml .Values.ingestion.resources | nindent 16 }}
               securityContext:
                 runAsNonRoot: true
+                runAsUser: 10001
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true
                 capabilities:
@@ -44,3 +60,6 @@ spec:
             - name: scratch
               emptyDir:
                 sizeLimit: {{ .Values.ingestion.scratchSize | quote }}
+            - name: home
+              emptyDir:
+                sizeLimit: "64Mi"

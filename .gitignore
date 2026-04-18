@@ -12,3 +12,4 @@ venv/
 .DS_Store
 deploy/helm/gitdoc/values-*.yaml
 !deploy/helm/gitdoc/values-example.yaml
+deploy/helm/gitdoc/test-render/

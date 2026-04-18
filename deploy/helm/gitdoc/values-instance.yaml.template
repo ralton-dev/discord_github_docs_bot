@@ -1,0 +1,95 @@
+# gitdoc per-instance values template.
+#
+# 1. Copy this file to values-<slug>.yaml in the same directory.
+#       cp values-instance.yaml.template values-<slug>.yaml
+# 2. Replace every CHANGE_ME / <...> placeholder below.
+# 3. Run from the repo root:
+#       make helm-install REPO=<slug>
+#
+# WARNING: this file ends up containing PLAINTEXT SECRETS in git if you
+# commit it. For MVP this is accepted — see implementation_plans/10-secrets-
+# hardening.md, which moves these fields onto sealed-secrets / external-
+# secrets. Until that lands, KEEP values-<slug>.yaml OUT OF git (it is
+# already covered by the project gitignore).
+#
+# Naming rules
+# ------------
+# - <slug> matches the Postgres role/db produced by db/provision/provision-
+#   instance.sql (lowercase letters, digits, underscores). The Helm release
+#   name becomes `gitdoc-<slug>` and lives in namespace `gitdoc-<slug>`.
+# - The slug used in `repo.name` below is also what the chunks table is
+#   keyed on (repo column) and what the RAG orchestrator's /ask payload
+#   sends. Pick it once; changing it later means re-ingesting.
+
+# ---------------------------------------------------------------------------
+# Repository being indexed
+# ---------------------------------------------------------------------------
+repo:
+  # Slug — must match the namespace suffix and the Postgres slug. Use
+  # hyphens or underscores; whichever you pick, be consistent.
+  name: "CHANGE_ME_slug"
+  # Public HTTPS clone URL. For private repos add `secrets.gitToken` below.
+  url:  "https://github.com/CHANGE_ME_org/CHANGE_ME_repo.git"
+  # Branch to track. Most projects: main. Some still use master.
+  branch: "main"
+
+# ---------------------------------------------------------------------------
+# Image tags — pin to the resolved tag from `make print-tag` at deploy time.
+# That command emits e.g. 0.1.0-9b83072. Pin every service to the SAME tag
+# unless you are intentionally rolling out a partial upgrade.
+# ---------------------------------------------------------------------------
+images:
+  bot:        { tag: "CHANGE_ME_release_tag" }   # e.g. 0.1.0-9b83072
+  rag:        { tag: "CHANGE_ME_release_tag" }
+  ingestion:  { tag: "CHANGE_ME_release_tag" }
+
+# ---------------------------------------------------------------------------
+# Secrets — plain text for MVP. See WARNING above.
+# ---------------------------------------------------------------------------
+secrets:
+  # Discord bot token from https://discord.com/developers/applications/<id>/bot
+  discordBotToken: "CHANGE_ME_discord_bot_token"
+
+  # LiteLLM API key (the `master_key` or a virtual key on the LiteLLM proxy).
+  litellmApiKey: "CHANGE_ME_litellm_key"
+
+  # Postgres DSN built from db/provision/README.md step 3:
+  #   postgresql://gitdoc_<slug>:<password>@<host>:5432/gitdoc_<slug>?sslmode=require
+  postgresDsn: "postgresql://gitdoc_CHANGE_ME_slug:CHANGE_ME_password@CHANGE_ME_pg_host:5432/gitdoc_CHANGE_ME_slug?sslmode=require"
+
+  # Personal access token for private repo clones. Leave "" for public repos.
+  # GitHub: a fine-grained PAT scoped to read-only on the single repo is enough.
+  gitToken: ""
+
+# ---------------------------------------------------------------------------
+# Discord — guildAllowlist gates the /ask command. Empty = allow every guild
+# the bot is invited to. For a homelab single-server setup, lock it down to
+# the one guild ID.
+# ---------------------------------------------------------------------------
+discordBot:
+  guildAllowlist: "CHANGE_ME_guild_id"   # comma-separate to allow multiple
+
+# ---------------------------------------------------------------------------
+# Models — only override the chat default if you want something other than
+# ollama_chat/llama3.2:3b for THIS instance. Once task 17 (runtime model
+# selection) ships, the bot's `/model set` command persists per-instance
+# choice in the DB and overrides this default at request time.
+#
+# Whatever you set here MUST exist as a model alias in the LiteLLM proxy
+# config. If LiteLLM returns 404 model_not_found, fix the alias there.
+# ---------------------------------------------------------------------------
+models:
+  chat: "ollama_chat/llama3.2:3b"
+  # embed/embedDim are inherited from chart defaults (text-embedding-3-small
+  # at 1536). Changing these on an existing instance means re-embedding every
+  # chunk — only override on a fresh DB.
+  # embed: "text-embedding-3-small"
+  # embedDim: 1536
+
+# ---------------------------------------------------------------------------
+# Ingestion cadence — every 6 hours by default. Tighter cadence costs more
+# embedding tokens; looser cadence makes the bot lag behind merged PRs.
+# Cron is interpreted in the cluster's timezone (usually UTC).
+# ---------------------------------------------------------------------------
+ingestion:
+  schedule: "0 */6 * * *"

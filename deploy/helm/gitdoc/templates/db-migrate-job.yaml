@@ -17,6 +17,14 @@ spec:
         {{- include "gitdoc.labels" . | nindent 8 }}
     spec:
       restartPolicy: Never
+      securityContext:
+        # postgres:16-alpine ships a non-root `postgres` user (uid 70).
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: migrate
           image: {{ .Values.dbMigrate.image | quote }}
@@ -31,11 +39,23 @@ spec:
                 secretKeyRef:
                   name: {{ include "gitdoc.fullname" . }}-secrets
                   key: POSTGRES_DSN
+            - name: HOME
+              value: /tmp
           volumeMounts:
             - name: migrations
               mountPath: /migrations
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
       volumes:
         - name: migrations
           configMap:
             name: {{ include "gitdoc.fullname" . }}-migrations
+        - name: tmp
+          emptyDir:
+            sizeLimit: "16Mi"
 {{- end }}
