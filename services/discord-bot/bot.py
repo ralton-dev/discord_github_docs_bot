@@ -26,6 +26,14 @@ THREAD_AUTO_ARCHIVE_MINUTES = 60    # Discord accepts: 60 / 1440 / 4320 / 10080.
 HISTORY_TURN_LIMIT = 10             # Last N messages to consider as history.
 HISTORY_CHAR_BUDGET = 3000          # Drop oldest until total content <= budget.
 
+# Timeout for /ask calls against the orchestrator. Default 180s because a
+# locally-hosted LLM (Ollama) can take 30–90s to cold-load a model on the
+# first request, and the bot's 60s was not enough to survive that. Discord
+# gives us 15 minutes to respond via followup after defer(thinking=True),
+# so 180s is well within the window. Override via the chart's
+# `discordBot.askTimeoutSecs`.
+ASK_TIMEOUT_SECS = int(os.environ.get("ASK_TIMEOUT_SECS", "180"))
+
 # message_content is a privileged intent. It is required for the bot to read
 # the bodies of replies in its threads (those replies do not mention the bot,
 # so the message_content intent is mandatory; without it the .content field
@@ -41,12 +49,195 @@ tree    = app_commands.CommandTree(client)
 _history_unsupported_logged = False
 
 
-def _format(answer: str, citations: list[dict]) -> str:
+async def _open_followup_thread(
+    interaction: "discord.Interaction",
+    answer_msg: "discord.Message",
+    name: str,
+) -> "discord.Thread | None":
+    """Open a public thread anchored on the /ask answer.
+
+    Discord's `Message.create_thread` requires the message to have
+    `.guild` populated. `interaction.followup.send(...)` returns a
+    WebhookMessage without guild context, and on current discord.py
+    `interaction.channel` is a PartialMessageable — so naïvely fetching
+    the message gives a Message whose `.guild` is also None.
+
+    Escalating strategy:
+
+    1. Resolve the real TextChannel via ``interaction.guild.get_channel``
+       (cheap, cached) and fetch the posted message through it. That
+       Message has `.guild` attached, so Message.create_thread works.
+    2. If that fails, create a starter-less public thread directly on
+       the TextChannel via ``TextChannel.create_thread(name=...)``. The
+       thread still appears in the channel and follow-ups work the same
+       way; it just won't be visually anchored to the answer message.
+    3. If even that fails (DMs, missing perms), return ``None`` so the
+       caller can fall back to sending remaining chunks inline.
+    """
+    guild = interaction.guild
+    if guild is None or interaction.channel_id is None:
+        return None
+
+    channel = guild.get_channel(interaction.channel_id)
+    if channel is None:
+        try:
+            channel = await guild.fetch_channel(interaction.channel_id)
+        except discord.HTTPException:
+            channel = None
+
+    # Strategy 1: fetch the answer as a guild-attached Message and
+    # create the thread off it (the UX that visually anchors the
+    # thread under the answer).
+    if channel is not None and hasattr(channel, "fetch_message"):
+        try:
+            guild_msg = await channel.fetch_message(answer_msg.id)
+            if guild_msg.guild is not None:
+                return await guild_msg.create_thread(
+                    name=name,
+                    auto_archive_duration=THREAD_AUTO_ARCHIVE_MINUTES,
+                )
+        except discord.Forbidden:
+            # Expected + user-fixable: bot lacks Read Message History or
+            # Create Public Threads in this channel. The caller will
+            # degrade to posting chunks inline; a final WARNING is
+            # emitted up there so we don't double-log here.
+            pass
+        except (discord.HTTPException, ValueError):
+            log.exception("strategy 1 (message.create_thread) failed")
+
+    # Strategy 2: starter-less thread directly on the channel. Loses
+    # the "anchored under the answer" visual, but still gives us a
+    # thread for follow-ups.
+    if channel is not None and hasattr(channel, "create_thread"):
+        try:
+            return await channel.create_thread(
+                name=name,
+                auto_archive_duration=THREAD_AUTO_ARCHIVE_MINUTES,
+                type=discord.ChannelType.public_thread,
+            )
+        except discord.Forbidden:
+            pass
+        except TypeError:
+            # `type=` unsupported in some older discord.py versions.
+            try:
+                return await channel.create_thread(
+                    name=name,
+                    auto_archive_duration=THREAD_AUTO_ARCHIVE_MINUTES,
+                )
+            except discord.Forbidden:
+                pass
+            except discord.HTTPException:
+                log.exception("strategy 2 (channel.create_thread) failed")
+        except discord.HTTPException:
+            log.exception("strategy 2 (channel.create_thread) failed")
+
+    return None
+
+
+# Discord hard-caps messages at 2000 chars. Leave ~100 char headroom for
+# inline markup Discord adds server-side and to avoid edge-case off-by-ones.
+DISCORD_MSG_LIMIT = 1900
+
+
+def _split_answer(answer: str, limit: int = DISCORD_MSG_LIMIT) -> list[str]:
+    """Split ``answer`` into chunks each ``<= limit`` characters.
+
+    Prefers paragraph (`\\n\\n`) breaks, falls back to sentence / single
+    newline breaks, then word boundaries, then a hard cut. Preserves
+    code-fence boundaries best-effort: if a cut would leave an open
+    ``` fence, we close it on the current chunk and re-open it on the
+    next so each message renders correctly on its own.
+
+    Returns a non-empty list — a short answer yields ``[answer]``.
+    """
+    if len(answer) <= limit:
+        return [answer]
+
+    chunks: list[str] = []
+    remaining = answer
+    while len(remaining) > limit:
+        # Preferred cut: paragraph break in the last ~half of the window.
+        cut = remaining.rfind("\n\n", 0, limit)
+        if cut < limit // 2:
+            # Sentence boundary: include the terminating punctuation in
+            # the current chunk, so `.rfind(". ", ...) + 1` cuts *after*
+            # the period, not before it.
+            sentence = max(
+                remaining.rfind(". ", 0, limit),
+                remaining.rfind("! ", 0, limit),
+                remaining.rfind("? ", 0, limit),
+            )
+            if sentence >= 0:
+                sentence += 1
+            newline = remaining.rfind("\n", 0, limit)
+            cut = max(sentence, newline, cut)
+        if cut < limit // 4:
+            cut = remaining.rfind(" ", 0, limit)
+        if cut <= 0:
+            # Nothing broke cleanly — hard-slice. Rare in practice; only
+            # triggered by a single token longer than `limit`.
+            cut = limit
+
+        piece = remaining[:cut].rstrip()
+        # Balance ``` fences across the split so each chunk is valid
+        # markdown on its own.
+        if piece.count("```") % 2 == 1:
+            piece += "\n```"
+            prefix = "```\n"
+        else:
+            prefix = ""
+        chunks.append(piece)
+        remaining = prefix + remaining[cut:].lstrip()
+
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
+def _sources_block(citations: list[dict]) -> str:
+    """Render the trailing `**Sources**` block shared by single- and
+    multi-message answers. Always starts with the separator blank line.
+    """
     cites = "\n".join(
         f"- `{c['path']}` @ `{c['commit_sha'][:7]}`" for c in citations
     ) or "_no sources_"
-    msg = f"{answer}\n\n**Sources**\n{cites}"
-    # Discord hard-caps messages at 2000 chars.
+    return f"\n\n**Sources**\n{cites}"
+
+
+def _format_messages(
+    answer: str,
+    citations: list[dict],
+    limit: int = DISCORD_MSG_LIMIT,
+) -> list[str]:
+    """Return the sequence of Discord messages for ``(answer, citations)``.
+
+    Short answers collapse to a single element; long answers split the
+    body across multiple messages and append the Sources block to the
+    LAST message (or, if the sources would overflow that last chunk, as
+    a dedicated final message). Every element is ``<= limit`` chars.
+    """
+    sources = _sources_block(citations)
+
+    # Happy path: everything fits in one message.
+    if len(answer) + len(sources) <= limit:
+        return [answer + sources]
+
+    # Split the answer, then glue the sources block to the last part
+    # (or push it onto its own message if there's no room).
+    parts = _split_answer(answer, limit)
+    if len(parts[-1]) + len(sources) <= limit:
+        parts[-1] = parts[-1] + sources
+    else:
+        parts.append(sources.lstrip())
+    return parts
+
+
+def _format(answer: str, citations: list[dict]) -> str:
+    """Legacy single-message formatter. Kept for callers that only need a
+    preview and don't care about >1900-char truncation (tests, log lines).
+    Prefer :func:`_format_messages` on the hot path.
+    """
+    msg = answer + _sources_block(citations)
     return msg if len(msg) <= 1990 else msg[:1987] + "..."
 
 
@@ -176,6 +367,23 @@ def _format_rate_limited_message(err: RateLimitedError) -> str:
     )
 
 
+class ModelNotSetError(Exception):
+    """Raised by `_ask_orchestrator` when the orchestrator returns 409
+    because no chat model has been configured for this instance.
+
+    Distinct from a generic HTTP error: the remedy is explicit (run
+    `/model set`), so the command handlers render a specific nudge
+    message instead of "something went wrong".
+    """
+
+
+_MODEL_NOT_SET_MESSAGE = (
+    "This bot doesn't have a chat model configured yet.\n"
+    "A server admin can run `/model set <name>` to pick one. "
+    "Try `/model list` first to see what's available."
+)
+
+
 async def _ask_orchestrator(
     query: str,
     history: list[dict] | None = None,
@@ -211,7 +419,7 @@ async def _ask_orchestrator(
     if user_id is not None:
         body["user_id"] = user_id
 
-    async with httpx.AsyncClient(timeout=60) as h:
+    async with httpx.AsyncClient(timeout=ASK_TIMEOUT_SECS) as h:
         r = await h.post(f"{RAG_URL}/ask", json=body)
         # Rate limit first — we do NOT retry and we do NOT fall back to
         # "no history". 429 is a positive signal from the orchestrator
@@ -225,6 +433,11 @@ async def _ask_orchestrator(
             retry_after = int(err_body.get("retry_after") or 60)
             reason = str(err_body.get("error") or "rate_limited")
             raise RateLimitedError(retry_after=retry_after, reason=reason)
+        # 409 "model not set" — distinct from rate limit / generic error.
+        # The retry-without-history fallback below is NOT triggered here:
+        # re-sending won't make the model materialise.
+        if r.status_code == 409:
+            raise ModelNotSetError()
         if r.status_code == 422 and history:
             # Most likely cause: orchestrator hasn't shipped the history
             # field yet. Log once at INFO, then retry single-turn so the
@@ -307,6 +520,20 @@ async def ask(
             _format_rate_limited_message(rle), ephemeral=True,
         )
         return
+    except ModelNotSetError:
+        log.info(
+            "rag model not set",
+            extra={
+                "event": "bot.response",
+                "query_id": query_id,
+                "guild_id": interaction.guild_id,
+                "repo": REPO,
+                "response_chars": 0,
+                "outcome": "model_not_set",
+            },
+        )
+        await interaction.followup.send(_MODEL_NOT_SET_MESSAGE, ephemeral=True)
+        return
     except Exception:
         log.exception(
             "rag call failed",
@@ -324,7 +551,8 @@ async def ask(
         )
         return
 
-    formatted = _format(data["answer"], data.get("citations", []))
+    messages = _format_messages(data["answer"], data.get("citations", []))
+    total_chars = sum(len(m) for m in messages)
     log.info(
         "bot response",
         extra={
@@ -332,28 +560,68 @@ async def ask(
             "query_id": query_id,
             "guild_id": interaction.guild_id,
             "repo": REPO,
-            "response_chars": len(formatted),
+            "response_chars": total_chars,
+            "response_messages": len(messages),
             "outcome": "ok" if data.get("citations") else "empty",
         },
     )
 
-    # Single-turn opt-out path: behaves exactly like the original bot.
+    # Single-turn opt-out path: send every chunk in order to the channel.
     if single:
-        await interaction.followup.send(formatted)
+        for part in messages:
+            await interaction.followup.send(part)
         return
 
-    # Default: post the answer, then spin up a thread off the response so
-    # the user can keep asking follow-ups in-place.
-    answer_msg = await interaction.followup.send(formatted, wait=True)
+    # Default: post the first chunk, open a thread off it, and post any
+    # remaining chunks inside the thread so follow-ups stay contextual.
+    answer_msg = await interaction.followup.send(messages[0], wait=True)
     try:
         thread_name = (query or "follow-up").strip()[:THREAD_NAME_LIMIT] or "follow-up"
-        await answer_msg.create_thread(
+        # Thread creation requires a guild-attached Message. In current
+        # discord.py `interaction.channel` is a PartialMessageable for
+        # interactions, so `partial.fetch_message(...)` returns a Message
+        # whose `.guild` is None — good enough for most operations but
+        # rejected by `Message.create_thread`. Resolving the real
+        # TextChannel via `interaction.guild.get_channel(...)` gives us a
+        # channel that carries the guild link, and fetching through THAT
+        # gives a Message with .guild attached.
+        thread = await _open_followup_thread(
+            interaction=interaction,
+            answer_msg=answer_msg,
             name=thread_name,
-            auto_archive_duration=THREAD_AUTO_ARCHIVE_MINUTES,
         )
-    except discord.HTTPException:
-        # Thread creation can fail (DMs, missing perms). The user still has
-        # the answer; just log and move on.
+        # Post any remaining chunks inside the thread so they stay with
+        # the original answer and don't spam the channel.
+        if thread is not None:
+            for part in messages[1:]:
+                await thread.send(part, silent=True)
+        else:
+            # No thread available (bot lacks channel perms, or the
+            # channel type doesn't support threads, etc.). NOT an error
+            # — the answer still lands via interaction followups. Single
+            # WARNING so the operator can see the degrade in Grafana
+            # without an ERROR-level flood on every /ask.
+            log.warning(
+                "thread creation skipped; posting full answer inline",
+                extra={
+                    "event": "bot.thread_skipped",
+                    "query_id": query_id,
+                    "guild_id": interaction.guild_id,
+                    "channel_id": interaction.channel_id,
+                    "repo": REPO,
+                    "message_count": len(messages),
+                    "hint": (
+                        "bot likely lacks Create Public Threads or Read "
+                        "Message History in this channel; see "
+                        "docs/discord-setup.md"
+                    ),
+                },
+            )
+            for part in messages[1:]:
+                await interaction.followup.send(part)
+    except (discord.HTTPException, ValueError):
+        # Thread creation can fail (DMs, missing perms, non-guild
+        # channel). The user still has the answer; log and move on.
         log.exception("failed to create thread for /ask follow-ups")
 
 
@@ -415,6 +683,20 @@ async def on_message(message: discord.Message) -> None:
             silent=True,
         )
         return
+    except ModelNotSetError:
+        log.info(
+            "rag model not set for thread follow-up",
+            extra={
+                "event": "bot.response",
+                "query_id": query_id,
+                "guild_id": message.guild.id if message.guild else None,
+                "repo": REPO,
+                "response_chars": 0,
+                "outcome": "model_not_set",
+            },
+        )
+        await thread.send(_MODEL_NOT_SET_MESSAGE, silent=True)
+        return
     except Exception:
         log.exception(
             "rag call failed for thread follow-up",
@@ -433,7 +715,8 @@ async def on_message(message: discord.Message) -> None:
         )
         return
 
-    formatted = _format(data["answer"], data.get("citations", []))
+    messages = _format_messages(data["answer"], data.get("citations", []))
+    total_chars = sum(len(m) for m in messages)
     log.info(
         "bot response",
         extra={
@@ -441,14 +724,16 @@ async def on_message(message: discord.Message) -> None:
             "query_id": query_id,
             "guild_id": message.guild.id if message.guild else None,
             "repo": REPO,
-            "response_chars": len(formatted),
+            "response_chars": total_chars,
+            "response_messages": len(messages),
             "outcome": "ok" if data.get("citations") else "empty",
         },
     )
-    await thread.send(
-        formatted,
-        silent=True,  # MessageFlags(suppress_notifications=True)
-    )
+    for part in messages:
+        await thread.send(
+            part,
+            silent=True,  # MessageFlags(suppress_notifications=True)
+        )
 
 
 async def _is_bot_thread(thread: "discord.Thread") -> bool:
@@ -593,9 +878,12 @@ async def _model_current(interaction: discord.Interaction):
         return
     chat_model = data.get("chat_model")
     if not chat_model:
+        # No chart default exists (plan 17). /ask will refuse until a
+        # Manage-Server user runs /model set.
         await interaction.followup.send(
-            "Using the chart default (no per-instance override set). "
-            "Run `/model set <name>` to pick one.",
+            "No chat model is configured for this instance yet.\n"
+            "A server admin can run `/model set <name>` "
+            "(use `/model list` to see the options).",
             ephemeral=True,
         )
         return
@@ -663,6 +951,8 @@ async def _model_set(interaction: discord.Interaction, name: str):
         )
         return
     if status == 400:
+        # 4xx validation errors ARE actionable (bad model name, etc.) —
+        # surface verbatim so the user can self-correct.
         err = body.get("error", "unknown error")
         available = body.get("available") or []
         sample = ", ".join(f"`{a}`" for a in available[:10])
@@ -672,9 +962,24 @@ async def _model_set(interaction: discord.Interaction, name: str):
             ephemeral=True,
         )
         return
-    if status >= 300:
+    if status >= 500:
+        # 5xx is a backend fault. Log the raw body for us; give the user
+        # something friendly instead of a psycopg traceback in Discord.
+        log.error(
+            "rag POST /settings returned %s",
+            status,
+            extra={"event": "bot.model_set_backend_error", "status": status, "body": body},
+        )
         await interaction.followup.send(
-            f"Orchestrator returned {status}: {body.get('error', 'unknown error')}",
+            "Couldn't update the active model right now. Try again shortly.",
+            ephemeral=True,
+        )
+        return
+    if status >= 300:
+        # Other 4xx (401/403/404 etc.) — show the sanitised error field, not the raw body.
+        err = body.get("error", "request rejected")
+        await interaction.followup.send(
+            f"Couldn't update the model: {err}",
             ephemeral=True,
         )
         return

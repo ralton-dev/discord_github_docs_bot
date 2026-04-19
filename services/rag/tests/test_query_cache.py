@@ -375,7 +375,7 @@ class TestAskCacheMiss:
         # Short-circuit the settings lookup so it doesn't consume a
         # scripted connection slot.
         monkeypatch.setattr(
-            rag_app, "_get_chat_model_for_repo", lambda r: rag_app.CHAT_MODEL,
+            rag_app, "_get_chat_model_for_repo", lambda r: "test-chat-model",
         )
 
         # First connect: SELECT returns None (cache miss).
@@ -431,7 +431,7 @@ class TestAskCacheNoInsertOnEmpty:
         monkeypatch.setattr(rag_app, "llm", fake_llm)
         monkeypatch.setattr(rag_app, "_retrieve", lambda *a, **kw: [])
         monkeypatch.setattr(
-            rag_app, "_get_chat_model_for_repo", lambda r: rag_app.CHAT_MODEL,
+            rag_app, "_get_chat_model_for_repo", lambda r: "test-chat-model",
         )
 
         # Only the cache-miss SELECT should happen. If the code issued a
@@ -481,7 +481,7 @@ class TestAskCacheDisabled:
         # Short-circuit the settings lookup — it would otherwise try to
         # connect to Postgres.
         monkeypatch.setattr(
-            rag_app, "_get_chat_model_for_repo", lambda r: rag_app.CHAT_MODEL,
+            rag_app, "_get_chat_model_for_repo", lambda r: "test-chat-model",
         )
 
         resp = client.post("/ask", json={"query": "q", "repo": repo})

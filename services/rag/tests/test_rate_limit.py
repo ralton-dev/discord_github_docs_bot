@@ -344,7 +344,7 @@ class TestAskUnderBudget:
             lambda *a, **kw: [("src/f.py", "sha-u", "contents", "code")],
         )
         monkeypatch.setattr(
-            rag_app, "_get_chat_model_for_repo", lambda r: rag_app.CHAT_MODEL,
+            rag_app, "_get_chat_model_for_repo", lambda r: "test-chat-model",
         )
 
         # Rate-limit check: two SUM queries returning 0 each.
@@ -385,7 +385,7 @@ class TestAskUnderBudget:
             lambda *a, **kw: [("src/f.py", "sha-off", "contents", "code")],
         )
         monkeypatch.setattr(
-            rag_app, "_get_chat_model_for_repo", lambda r: rag_app.CHAT_MODEL,
+            rag_app, "_get_chat_model_for_repo", lambda r: "test-chat-model",
         )
 
         # No DB connections should be made.

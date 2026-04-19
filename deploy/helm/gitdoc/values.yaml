@@ -7,15 +7,15 @@ nameOverride: ""
 images:
   bot:
     repository: ghcr.io/ralton-dev/gitdoc-discord-bot
-    tag: "0.0.3"
+    tag: "0.0.11"
     pullPolicy: IfNotPresent
   rag:
     repository: ghcr.io/ralton-dev/gitdoc-rag
-    tag: "0.0.3"
+    tag: "0.0.11"
     pullPolicy: IfNotPresent
   ingestion:
     repository: ghcr.io/ralton-dev/gitdoc-ingestion
-    tag: "0.0.3"
+    tag: "0.0.11"
     pullPolicy: IfNotPresent
 
 repo:
@@ -27,11 +27,16 @@ litellm:
   baseUrl: "http://litellm.litellm.svc.cluster.local:4000"
 
 models:
+  # Embedding model. Fixed at install time — changing it on a live
+  # instance invalidates every stored vector and requires a full
+  # re-ingest. embedDim must match the model's output dimensionality.
   embed: "text-embedding-3-small"
   embedDim: 1536
-  # Default chat model — runtime-overridable via the bot's /model command
-  # once task 17 lands (per-instance setting persisted in the DB).
-  chat: "ollama_chat/llama3.2:3b"
+  # No `chat` default. The active chat model lives in
+  # `instance_settings.chat_model`, set at runtime via the bot's
+  # `/model set <name>` slash command. /ask returns 409 "model not set"
+  # until the operator has picked one — this forces the choice to be
+  # validated against what LiteLLM actually exposes at /v1/models.
 
 # Secrets are materialised into a Kubernetes Secret the workloads envFrom.
 #
@@ -74,6 +79,10 @@ secrets:
 discordBot:
   replicas: 1
   guildAllowlist: ""   # comma-separated guild IDs; empty = allow all
+  # Seconds to wait for the rag orchestrator's /ask response. Default 180
+  # accommodates a cold Ollama model load on first call. Drop to 60 if
+  # you run only hosted (always-warm) models via LiteLLM.
+  askTimeoutSecs: 180
   resources:
     requests:
       cpu: "50m"

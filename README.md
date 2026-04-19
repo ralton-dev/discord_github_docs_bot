@@ -34,18 +34,28 @@ turns are included in the next answer's context.
 
 ## Docs
 
-- **Start here:** [`docs/architecture.md`](docs/architecture.md) — how
-  the pieces fit together.
-- **Deploying a new instance:** [`deploy/DEPLOY.md`](deploy/DEPLOY.md) +
-  [`docs/discord-setup.md`](docs/discord-setup.md).
-- **Retrieval internals** (hybrid search, reranker, cache, rate limits):
-  [`docs/retrieval.md`](docs/retrieval.md).
-- **Webhook-driven ingestion:** [`docs/webhooks.md`](docs/webhooks.md).
-- **Metrics & logs:** [`docs/observability.md`](docs/observability.md).
-- **Runtime model selection:** [`docs/models.md`](docs/models.md).
-- **Secrets workflow:** [`deploy/SECRETS.md`](deploy/SECRETS.md).
-- **Design decisions & open work:**
-  [`implementation_plans/`](implementation_plans/).
+### Using it
+
+- **[`docs/configuration.md`](docs/configuration.md)** — every knob, what
+  it does, how to change it. Start here when you want to tweak behaviour.
+- **[`deploy/DEPLOY.md`](deploy/DEPLOY.md)** — step-by-step first deploy.
+- **[`docs/discord-setup.md`](docs/discord-setup.md)** — Discord
+  dev-portal walkthrough (create app, intents, invite URL).
+- **[`deploy/SECRETS.md`](deploy/SECRETS.md)** — sealed-secrets workflow.
+- **[`docs/models.md`](docs/models.md)** — the `/model` slash commands.
+- **[`docs/webhooks.md`](docs/webhooks.md)** — GitHub/GitLab push webhooks.
+- **[`docs/observability.md`](docs/observability.md)** — metrics + logs.
+
+### Hacking on it
+
+- [`docs/architecture.md`](docs/architecture.md) — how the services fit
+  together (for contributors).
+- [`docs/retrieval.md`](docs/retrieval.md) — hybrid search, reranker,
+  cache internals.
+- [`implementation_plans/`](implementation_plans/) — design decisions and
+  open work.
+- [`db/provision/README.md`](db/provision/README.md) — Postgres
+  per-instance provisioning.
 
 ## License
 

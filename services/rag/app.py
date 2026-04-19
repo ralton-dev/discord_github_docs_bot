@@ -28,7 +28,9 @@ LITELLM_BASE = os.environ["LITELLM_BASE_URL"]
 LITELLM_KEY  = os.environ["LITELLM_API_KEY"]
 PG_DSN       = os.environ["POSTGRES_DSN"]
 EMBED_MODEL  = os.environ.get("EMBED_MODEL", "text-embedding-3-small")
-CHAT_MODEL   = os.environ.get("CHAT_MODEL",  "claude-opus-4-7")
+# Chat model is NOT read from env. Plan 17 stores the active model in
+# `instance_settings` and requires an explicit `/model set` before /ask
+# will answer. A stale env-var default would mask misconfiguration.
 
 # Hybrid retrieval (plan 11). When enabled, /ask blends pgvector similarity
 # with a BM25-style ranking over the `chunks.content_tsv` GIN index using
@@ -127,18 +129,23 @@ def _invalidate_models_cache() -> None:
     _models_cache["fetched_at"] = -1e18
 
 
-def _get_chat_model_for_repo(repo: str) -> str:
-    """Return the active chat model for ``repo``.
+def _get_chat_model_for_repo(repo: str) -> str | None:
+    """Return the DB-configured chat model for ``repo``, or ``None`` if unset.
 
-    Resolves to ``instance_settings.chat_model`` if set, otherwise the
-    ``CHAT_MODEL`` env-var default. Cached per-repo for _SETTINGS_TTL so
-    /ask does not touch Postgres on every request. The cache stores the
-    resolved string (default or override) as a tuple ``(value, fetched_at)``.
+    No env-var fallback. The operator must pick a model that LiteLLM
+    actually exposes — which we can only verify against /v1/models at
+    `/model set` time. Silently routing traffic to a stale env default
+    would hide the misconfiguration; returning None surfaces it so
+    callers can tell the user to run /model set.
+
+    Cached per-repo for _SETTINGS_TTL so /ask doesn't touch Postgres on
+    the hot path. DB errors also surface as None — we'd rather block
+    /ask with a clear "not set" than keep answering from a stale guess.
     """
     now = _clock()
     cached = _settings_cache.get(repo)
     if cached is not None and (now - cached[1]) < _SETTINGS_TTL:
-        return cached[0] or CHAT_MODEL
+        return cached[0]
     try:
         with psycopg.connect(PG_DSN, connect_timeout=3, autocommit=True) as conn:
             row = conn.execute(
@@ -146,11 +153,11 @@ def _get_chat_model_for_repo(repo: str) -> str:
                 (repo,),
             ).fetchone()
     except Exception:
-        log.exception("instance_settings lookup failed; falling back to env default")
-        return CHAT_MODEL
+        log.exception("instance_settings lookup failed")
+        return None
     chat_model = row[0] if row and row[0] else None
     _settings_cache[repo] = (chat_model, now)
-    return chat_model or CHAT_MODEL
+    return chat_model
 
 
 def _invalidate_settings_cache(repo: str) -> None:
@@ -241,6 +248,20 @@ def _invalidate_commit_cache(repo: str | None = None) -> None:
         _commit_cache.pop(repo, None)
 
 
+class HistoryTurn(BaseModel):
+    """A single turn in a prior conversation, forwarded by the bot when a
+    user replies inside an /ask thread. ``role`` is always "user" or
+    "assistant" — the system prompt is ours, not theirs.
+
+    Bounded length to stop a pathological thread from blowing past the
+    chat model's context window in a single request. The bot already
+    budgets at 3000 chars total across all turns, so the per-turn cap
+    is a secondary guardrail.
+    """
+    role: str = Field(pattern=r"^(user|assistant)$")
+    content: str = Field(min_length=1, max_length=4000)
+
+
 class AskRequest(BaseModel):
     query: str = Field(min_length=1, max_length=2000)
     repo: str  = Field(min_length=1)
@@ -251,6 +272,13 @@ class AskRequest(BaseModel):
     # always sends these on every /ask call.
     guild_id: str | None = Field(default=None)
     user_id: str | None = Field(default=None)
+    # Prior turns from the thread the bot is replying in (plan 16). The
+    # bot builds this from the last N messages in the Thread; see
+    # services/discord-bot/bot.py::_collect_thread_history. We cap the
+    # list size here to stop a runaway thread from pushing past the
+    # chat model's context window — 20 turns plus the current question
+    # is comfortably within any modern model's window.
+    history: list[HistoryTurn] | None = Field(default=None, max_length=20)
 
 
 class Citation(BaseModel):
@@ -645,8 +673,10 @@ def ask(req: AskRequest):
                     )
             else:
                 metrics.CACHE_MISSES_TOTAL.labels(req.repo).inc()
-    # Resolve the active model per-request (plan 17). Cache means this is
-    # cheap on the hot path; falls back to CHAT_MODEL when no override is set.
+    # Resolve the active model per-request (plan 17). No env-var fallback —
+    # instance must have had /model set run explicitly. None here short-
+    # circuits with a 409 so the bot can surface "model not set" to the
+    # user instead of routing traffic to a misconfigured backend.
     model = _get_chat_model_for_repo(req.repo)
     log.info(
         "ask request received",
@@ -654,8 +684,25 @@ def ask(req: AskRequest):
             "event": "ask.received",
             "repo": req.repo,
             "query_chars": len(req.query),
+            "history_turns": len(req.history) if req.history else 0,
         },
     )
+    if model is None:
+        status = "unset"
+        log.info(
+            "ask rejected: chat model not set for repo",
+            extra={"event": "ask.unset", "repo": req.repo},
+        )
+        metrics.QUERIES_TOTAL.labels(req.repo, status).inc()
+        metrics.LATENCY_SECONDS.labels("ask").observe(time.perf_counter() - start)
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": "model not set",
+                "action": "a server admin must run /model set <name> "
+                          "(see /model list for options)",
+            },
+        )
     try:
         try:
             with metrics.timed(metrics.EMBED_LATENCY_SECONDS, req.repo):
@@ -737,14 +784,33 @@ def ask(req: AskRequest):
             + f"\n\nQuestion: {req.query}"
         )
 
+        # Assemble the chat-completions `messages` list.
+        #
+        #   [system prompt,
+        #    ...prior turns of this thread (user / assistant alternating),
+        #    current user turn with the retrieved context appended]
+        #
+        # Retrieval is only attached to the CURRENT user turn — prior
+        # turns carried the context they needed at the time they were
+        # answered. Injecting old context into every turn would blow past
+        # the context window on a long thread; the bot also pre-compacts
+        # prior assistant turns (`_compact_citations` strips the Sources
+        # block to a one-liner) so we can afford to forward the full
+        # natural narrative rather than just the most-recent question.
+        chat_messages: list[dict[str, str]] = [
+            {"role": "system", "content": SYSTEM_PROMPT}
+        ]
+        if req.history:
+            chat_messages.extend(
+                {"role": t.role, "content": t.content} for t in req.history
+            )
+        chat_messages.append({"role": "user", "content": user_prompt})
+
         try:
             with metrics.timed(metrics.CHAT_LATENCY_SECONDS, req.repo, model):
                 completion = llm.chat.completions.create(
                     model=model,
-                    messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user",   "content": user_prompt},
-                    ],
+                    messages=chat_messages,
                     temperature=0.1,
                     max_tokens=1024,
                 )
@@ -1046,7 +1112,8 @@ def ingestion_status(repo: str):
             ).fetchone()
     except Exception as exc:
         log.exception("status/ingestion db query failed")
-        raise HTTPException(status_code=503, detail=f"db unavailable: {exc}") from exc
+        # Sanitised external message; the full psycopg exception is in logs.
+        raise HTTPException(status_code=503, detail="database unavailable") from exc
 
     if row is None:
         return IngestionStatus(
@@ -1130,7 +1197,7 @@ def get_settings(repo: str):
             ).fetchone()
     except Exception as exc:
         log.exception("instance_settings GET failed")
-        raise HTTPException(status_code=503, detail=f"db unavailable: {exc}") from exc
+        raise HTTPException(status_code=503, detail="database unavailable") from exc
     if row is None:
         return SettingsResponse(
             repo=repo, chat_model=None, updated_at=None, updated_by=None,
@@ -1181,7 +1248,7 @@ def update_settings(body: SettingsUpdate):
             ).fetchone()
     except Exception as exc:
         log.exception("instance_settings POST failed")
-        raise HTTPException(status_code=503, detail=f"db unavailable: {exc}") from exc
+        raise HTTPException(status_code=503, detail="database unavailable") from exc
     # Hot path wins — drop any cached value so the next /ask picks this up.
     _invalidate_settings_cache(body.repo)
     chat_model, updated_at, updated_by = row

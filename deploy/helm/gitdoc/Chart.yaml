@@ -2,5 +2,5 @@ apiVersion: v2
 name: gitdoc
 description: Discord RAG chatbot backed by pgvector and LiteLLM.
 type: application
-version: 0.0.3
-appVersion: "0.0.3"
+version: 0.0.11
+appVersion: "0.0.11"

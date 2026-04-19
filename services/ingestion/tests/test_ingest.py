@@ -16,45 +16,120 @@ import ingest
 
 
 # ---------------------------------------------------------------------------
-# _auth_url
+# _git_auth_env — token must ride in an Authorization header, NOT in the URL
 # ---------------------------------------------------------------------------
 
-class TestAuthUrl:
-    def test_empty_token_returns_url_unchanged(self) -> None:
-        url = "https://github.com/org/repo.git"
-        assert ingest._auth_url(url, "") == url
+class TestGitAuthEnv:
+    def test_empty_token_returns_env_unchanged(self) -> None:
+        base = {"PATH": "/usr/bin", "HOME": "/tmp"}
+        got = ingest._git_auth_env(base, "")
+        assert got == base
+        # No GIT_CONFIG_* keys get added when there's no token.
+        assert "GIT_CONFIG_COUNT" not in got
+        assert "GIT_CONFIG_KEY_0" not in got
+        assert "GIT_CONFIG_VALUE_0" not in got
 
-    def test_token_interpolated_into_https_url(self) -> None:
-        url = "https://github.com/org/repo.git"
-        token = "ghp_abc123"
-        got = ingest._auth_url(url, token)
-        assert got == f"https://x-access-token:{token}@github.com/org/repo.git"
+    def test_token_sets_extraheader_via_git_config_env(self) -> None:
+        base = {"PATH": "/usr/bin"}
+        got = ingest._git_auth_env(base, "ghp_abc123")
+        assert got["GIT_CONFIG_COUNT"] == "1"
+        assert got["GIT_CONFIG_KEY_0"] == "http.extraheader"
+        value = got["GIT_CONFIG_VALUE_0"]
+        assert value.startswith("Authorization: Basic ")
+        # Decode the base64 payload and check it round-trips to
+        # "x-access-token:<token>".
+        import base64 as _b64
 
-    def test_token_interpolated_into_http_url(self) -> None:
-        url = "http://git.internal/org/repo.git"
-        got = ingest._auth_url(url, "tok")
-        assert got == "http://x-access-token:tok@git.internal/org/repo.git"
+        encoded = value.removeprefix("Authorization: Basic ")
+        decoded = _b64.b64decode(encoded).decode("utf-8")
+        assert decoded == "x-access-token:ghp_abc123"
 
-    def test_non_http_scheme_passthrough(self) -> None:
-        # ssh / git+ssh / file etc. must not be mangled.
-        for url in (
-            "ssh://git@github.com/org/repo.git",
-            "git@github.com:org/repo.git",
-            "file:///tmp/repo",
-        ):
-            assert ingest._auth_url(url, "tok") == url
+    def test_base_env_is_not_mutated(self) -> None:
+        base = {"PATH": "/usr/bin"}
+        _ = ingest._git_auth_env(base, "tok")
+        # Returned env has the keys; caller's env does not.
+        assert "GIT_CONFIG_COUNT" not in base
 
-    def test_port_preserved_when_present(self) -> None:
-        url = "https://git.internal:8443/org/repo.git"
-        got = ingest._auth_url(url, "tok")
-        assert got == "https://x-access-token:tok@git.internal:8443/org/repo.git"
+    def test_token_does_not_appear_in_argv_or_url(self) -> None:
+        # Sentinel check: whatever _git_auth_env produces, the token value
+        # itself only ends up inside the base64-encoded header. Grep the
+        # rendered string form.
+        got = ingest._git_auth_env({}, "super-secret-token-xyz")
+        # The raw token must NOT appear as-is in any value.
+        for v in got.values():
+            assert "super-secret-token-xyz" not in v
 
-    def test_port_absent_when_absent_in_source(self) -> None:
-        url = "https://github.com/org/repo.git"
-        got = ingest._auth_url(url, "tok")
-        # No trailing ":None" or ":" before the @.
-        assert "x-access-token:tok@github.com/" in got
-        assert ":None@" not in got
+
+# ---------------------------------------------------------------------------
+# _scrub_token — belt-and-braces redaction of accidental token leakage
+# ---------------------------------------------------------------------------
+
+class TestScrubToken:
+    def test_empty_token_passthrough(self) -> None:
+        assert ingest._scrub_token("hello ghp_abc", "") == "hello ghp_abc"
+
+    def test_empty_text_passthrough(self) -> None:
+        assert ingest._scrub_token("", "ghp_abc") == ""
+
+    def test_token_substring_redacted(self) -> None:
+        text = "fatal: auth failed at https://x-access-token:ghp_abc@github.com/..."
+        assert ingest._scrub_token(text, "ghp_abc") == (
+            "fatal: auth failed at https://x-access-token:<redacted>@github.com/..."
+        )
+
+    def test_multiple_occurrences_all_redacted(self) -> None:
+        text = "tok=abc123 tok_again=abc123"
+        assert ingest._scrub_token(text, "abc123") == (
+            "tok=<redacted> tok_again=<redacted>"
+        )
+
+
+# ---------------------------------------------------------------------------
+# _already_ingested — fast-exit when the branch SHA hasn't moved
+# ---------------------------------------------------------------------------
+
+
+class _StubCursor:
+    def __init__(self, row: tuple | None) -> None:
+        self._row = row
+
+    def fetchone(self) -> tuple | None:
+        return self._row
+
+
+class _StubConn:
+    """Minimal conn stub: `execute(...)` returns a preset row for fetchone()."""
+
+    def __init__(self, row: tuple | None) -> None:
+        self._row = row
+        self.queries: list[tuple[str, tuple]] = []
+
+    def execute(self, query: str, params: tuple = ()) -> _StubCursor:
+        self.queries.append((query, tuple(params)))
+        return _StubCursor(self._row)
+
+
+class TestAlreadyIngested:
+    def test_returns_true_when_ok_row_exists(self) -> None:
+        # A single matching row from the SELECT means the (repo, sha)
+        # combination has already been fully ingested.
+        conn = _StubConn(row=(1,))
+        assert ingest._already_ingested(conn, "myrepo", "abc123") is True
+
+    def test_returns_false_when_no_row(self) -> None:
+        conn = _StubConn(row=None)
+        assert ingest._already_ingested(conn, "myrepo", "abc123") is False
+
+    def test_query_filters_on_repo_sha_and_ok_status(self) -> None:
+        conn = _StubConn(row=None)
+        ingest._already_ingested(conn, "myrepo", "abc123")
+        query, params = conn.queries[0]
+        # Contract: the check MUST filter by status='ok'. A crashed run
+        # (status='running' or 'failed') should not block the retry.
+        assert "status = 'ok'" in query
+        assert "repo = %s" in query
+        assert "commit_sha = %s" in query
+        assert params == ("myrepo", "abc123")
 
 
 # ---------------------------------------------------------------------------
