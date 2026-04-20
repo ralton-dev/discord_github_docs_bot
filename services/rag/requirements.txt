@@ -3,7 +3,7 @@ uvicorn[standard]>=0.30,<1
 pydantic>=2.9,<3
 psycopg[binary]>=3.2,<4
 pgvector>=0.3,<1
-openai>=1.50,<2
+openai>=1.50,<3
 # prometheus-client exposes /metrics in the standard Prometheus text format.
 # We define metrics by hand (per-repo labels, retrieval hits) rather than use
 # prometheus-fastapi-instrumentator — the instrumentator's out-of-the-box
@@ -12,7 +12,7 @@ prometheus-client>=0.20,<1
 # kubernetes — used by /webhook to spawn Jobs from the ingestion CronJob.
 # Imported lazily inside the _K8sDeps wrapper so unit tests that never hit
 # that endpoint can skip installing the client.
-kubernetes>=30,<32
+kubernetes>=30,<36
 # httpx — used by `reranker.py` to POST to the cross-encoder reranker
 # endpoint. Already an indirect dep via openai/uvicorn/fastapi, pinned
 # here too so the runtime image always has the async client available
