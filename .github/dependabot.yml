@@ -1,5 +1,5 @@
-# Weekly reviewed minor/patch PR groups; majors remain separate.
-# Security PR groups require enabled repository alerts and security updates. No automerge.
+# Renovate owns update PRs; routine Dependabot version PRs are disabled.
+# Keep GitHub vulnerability alerts enabled. Automatic security PRs are a separate repo setting.
 ---
 version: 2
 updates:
@@ -8,16 +8,9 @@ updates:
     schedule:
       interval: weekly
       day: monday
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
     groups:
       actions:
-        patterns:
-          - "*"
-        update-types:
-          - minor
-          - patch
-      security-updates:
-        applies-to: security-updates
         patterns:
           - "*"
   - package-ecosystem: pip
@@ -25,16 +18,9 @@ updates:
     schedule:
       interval: weekly
       day: monday
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
     groups:
       rag-runtime:
-        patterns:
-          - "*"
-        update-types:
-          - minor
-          - patch
-      security-updates:
-        applies-to: security-updates
         patterns:
           - "*"
   - package-ecosystem: pip
@@ -42,16 +28,9 @@ updates:
     schedule:
       interval: weekly
       day: monday
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
     groups:
       ingestion-runtime:
-        patterns:
-          - "*"
-        update-types:
-          - minor
-          - patch
-      security-updates:
-        applies-to: security-updates
         patterns:
           - "*"
   - package-ecosystem: pip
@@ -59,16 +38,9 @@ updates:
     schedule:
       interval: weekly
       day: monday
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
     groups:
       bot-runtime:
-        patterns:
-          - "*"
-        update-types:
-          - minor
-          - patch
-      security-updates:
-        applies-to: security-updates
         patterns:
           - "*"
   - package-ecosystem: pip
@@ -76,63 +48,23 @@ updates:
     schedule:
       interval: weekly
       day: monday
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
     groups:
       dev-deps:
-        patterns:
-          - "*"
-        update-types:
-          - minor
-          - patch
-      security-updates:
-        applies-to: security-updates
         patterns:
           - "*"
   - package-ecosystem: docker
     directory: "/services/rag"
     schedule:
       interval: monthly
-    open-pull-requests-limit: 3
-    groups:
-      minor-and-patch:
-        patterns:
-          - "*"
-        update-types:
-          - minor
-          - patch
-      security-updates:
-        applies-to: security-updates
-        patterns:
-          - "*"
+    open-pull-requests-limit: 0
   - package-ecosystem: docker
     directory: "/services/ingestion"
     schedule:
       interval: monthly
-    open-pull-requests-limit: 3
-    groups:
-      minor-and-patch:
-        patterns:
-          - "*"
-        update-types:
-          - minor
-          - patch
-      security-updates:
-        applies-to: security-updates
-        patterns:
-          - "*"
+    open-pull-requests-limit: 0
   - package-ecosystem: docker
     directory: "/services/discord-bot"
     schedule:
       interval: monthly
-    open-pull-requests-limit: 3
-    groups:
-      minor-and-patch:
-        patterns:
-          - "*"
-        update-types:
-          - minor
-          - patch
-      security-updates:
-        applies-to: security-updates
-        patterns:
-          - "*"
+    open-pull-requests-limit: 0
