@@ -1,2 +1,5 @@
 discord.py>=2.4,<3
 httpx>=0.27,<1
+
+# Remove the affected emSign roots independently of pip/system certificates.
+certifi>=2026.10.19
