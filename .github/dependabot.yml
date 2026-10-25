@@ -1,78 +1,138 @@
-# Dependabot config — weekly cadence across every requirements file and
-# the GitHub Actions workflows. One PR per ecosystem + directory pair.
-#
-# PRs land on `main` and go through the same CI gate as human PRs, so
-# nothing merges unless `Lint + unit tests` and `Build images (verification)`
-# are green. Grouped updates to minimise noise.
-
+# Weekly reviewed minor/patch PR groups; majors remain separate.
+# Security PR groups require enabled repository alerts and security updates. No automerge.
+---
 version: 2
 updates:
-  # --- GitHub Actions (ci.yml + release.yml) -------------------------------
   - package-ecosystem: github-actions
-    directory: /
+    directory: "/"
     schedule:
       interval: weekly
       day: monday
     open-pull-requests-limit: 5
     groups:
       actions:
-        patterns: ["*"]
-
-  # --- Python services ----------------------------------------------------
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+      security-updates:
+        applies-to: security-updates
+        patterns:
+          - "*"
   - package-ecosystem: pip
-    directory: /services/rag
+    directory: "/services/rag"
     schedule:
       interval: weekly
       day: monday
     open-pull-requests-limit: 5
     groups:
       rag-runtime:
-        patterns: ["*"]
-
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+      security-updates:
+        applies-to: security-updates
+        patterns:
+          - "*"
   - package-ecosystem: pip
-    directory: /services/ingestion
+    directory: "/services/ingestion"
     schedule:
       interval: weekly
       day: monday
     open-pull-requests-limit: 5
     groups:
       ingestion-runtime:
-        patterns: ["*"]
-
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+      security-updates:
+        applies-to: security-updates
+        patterns:
+          - "*"
   - package-ecosystem: pip
-    directory: /services/discord-bot
+    directory: "/services/discord-bot"
     schedule:
       interval: weekly
       day: monday
     open-pull-requests-limit: 5
     groups:
       bot-runtime:
-        patterns: ["*"]
-
-  # --- Dev deps (pytest, testcontainers, etc.) ----------------------------
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+      security-updates:
+        applies-to: security-updates
+        patterns:
+          - "*"
   - package-ecosystem: pip
-    directory: /
+    directory: "/"
     schedule:
       interval: weekly
       day: monday
     open-pull-requests-limit: 5
     groups:
       dev-deps:
-        patterns: ["*"]
-
-  # --- Docker base images (python:3.12-slim + postgres:16-alpine) ---------
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+      security-updates:
+        applies-to: security-updates
+        patterns:
+          - "*"
   - package-ecosystem: docker
-    directory: /services/rag
+    directory: "/services/rag"
     schedule:
       interval: monthly
     open-pull-requests-limit: 3
+    groups:
+      minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+      security-updates:
+        applies-to: security-updates
+        patterns:
+          - "*"
   - package-ecosystem: docker
-    directory: /services/ingestion
+    directory: "/services/ingestion"
     schedule:
       interval: monthly
     open-pull-requests-limit: 3
+    groups:
+      minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+      security-updates:
+        applies-to: security-updates
+        patterns:
+          - "*"
   - package-ecosystem: docker
-    directory: /services/discord-bot
+    directory: "/services/discord-bot"
     schedule:
       interval: monthly
     open-pull-requests-limit: 3
+    groups:
+      minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+      security-updates:
+        applies-to: security-updates
+        patterns:
+          - "*"
