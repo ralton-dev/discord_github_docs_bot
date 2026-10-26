@@ -18,6 +18,9 @@ RUN pip install -r requirements.txt
 
 COPY app.py webhook.py reranker.py metrics.py logging_config.py ./
 
+# Dependencies are installed above; the service never invokes pip at runtime.
+RUN python -m pip uninstall --yes pip
+
 RUN useradd -u 10001 -m app
 USER 10001
 
